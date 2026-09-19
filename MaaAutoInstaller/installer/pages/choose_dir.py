@@ -179,8 +179,17 @@ class ChooseDirPage(BasePage):
         dlg.setOption(QFileDialog.ShowDirsOnly, True)
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)   # ★ 关键
         dlg.setOption(QFileDialog.DontResolveSymlinks, True)
-        dlg.setLabelText(QFileDialog.Accept, self.i18n.t("page.dir.choose_this"))
-
+        dlg.setLabelText(QFileDialog.LookIn,
+                         self.i18n.t("page.dir.dialog.look_in"))
+        dlg.setLabelText(QFileDialog.FileName,
+                         self.i18n.t("page.dir.dialog.filename"))
+        dlg.setLabelText(QFileDialog.FileType,
+                         self.i18n.t("page.dir.dialog.filetype"))
+        dlg.setLabelText(QFileDialog.Reject,
+                         self.i18n.t("page.dir.dialog.reject"))
+        dlg.setLabelText(QFileDialog.Accept,
+                         self.i18n.t("page.dir.dialog.accept"))
+        
         if dlg.exec() != QFileDialog.Accepted:
             return
         files = dlg.selectedFiles()

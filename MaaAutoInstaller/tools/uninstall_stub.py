@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 import ctypes
+import winreg
 
 
 MB_OK = 0x0
@@ -28,6 +29,10 @@ MB_ICONINFORMATION = 0x40
 MB_ICONERROR = 0x10
 MB_DEFBUTTON2 = 0x100
 IDYES = 6
+_UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MaaAuto"
+_APP_PATH_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\MaaAuto.exe"
+_APPCOMPAT_KEY = (r"Software\Microsoft\Windows NT\CurrentVersion"
+                  r"\AppCompatFlags\Layers")
 
 
 def msg(title, text, flags=MB_OK | MB_ICONINFORMATION) -> int:
@@ -68,6 +73,29 @@ def remove_shortcuts():
         if folder.exists():
             import shutil
             shutil.rmtree(folder, ignore_errors=True)
+    except Exception:
+        pass
+
+def remove_registry(install_dir: Path):
+    """删除所有注册表项。全部静默处理失败。"""
+    # 卸载项
+    try:
+        winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, _UNINSTALL_KEY,
+                           winreg.KEY_WOW64_64KEY, 0)
+    except Exception:
+        pass
+    # App Paths
+    try:
+        winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, _APP_PATH_KEY,
+                           winreg.KEY_WOW64_64KEY, 0)
+    except Exception:
+        pass
+    # 管理员运行标志
+    try:
+        exe = str((Path(install_dir) / "MaaAuto.exe").resolve())
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APPCOMPAT_KEY,
+                            0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, exe)
     except Exception:
         pass
 
@@ -203,7 +231,7 @@ def main() -> int:
         MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
     )
     keep_user_data = (r2 == IDYES)
-
+    remove_registry(install_dir)
     remove_shortcuts()
 
     if launch_vbs(install_dir, keep_user_data):

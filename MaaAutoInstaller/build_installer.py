@@ -173,63 +173,78 @@ def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # 2) stubs（uninstall.exe / upgrade.exe）
 # --------------------------------------------------------------------------- #
-def build_stubs(force: bool, debug: bool):
+# stub 源码清单（相对安装器根）
+_STUB_SOURCE_FILES = [
+    ("tools/uninstall_stub.py",              "uninstall_stub.py"),
+    ("tools/upgrade_stub.py",                "upgrade_stub.py"),
+    ("VERSION",                              "VERSION"),
+    ("resources/icon.ico",                   "resources/icon.ico"),
+    ("installer/__init__.py",                "installer/__init__.py"),
+    ("installer/core/upgrade_engine.py",     "installer/core/upgrade_engine.py"),
+    ("installer/core/mirror.py",             "installer/core/mirror.py"),
+    ("installer/core/downloader.py",         "installer/core/downloader.py"),
+    ("installer/core/python_env.py",         "installer/core/python_env.py"),
+    ("installer/core/pip_installer.py",      "installer/core/pip_installer.py"),
+    ("installer/core/pyinstaller_builder.py","installer/core/pyinstaller_builder.py"),
+    ("installer/core/source_deployer.py",    "installer/core/source_deployer.py"),
+    ("installer/core/manifest.py",           "installer/core/manifest.py"),
+    ("installer/core/cleanup.py",            "installer/core/cleanup.py"),
+]
+
+
+def build_stubs_source_zip(output_zip: Path) -> Path:
     """
-    调用 tools/build_stubs.py 打包两个 stub。
+    打包 stub 源码子集，供用户端本地打包 stub 用。
+    - 不打包 shortcut / uninstall / upgrade 等涉及 pywin32 的模块
+    - installer/core/__init__.py 写一个最小化版本（避免拖入无关依赖）
     """
-    uninstall_exe = STUBS_OUT / "uninstall.exe"
-    upgrade_exe = STUBS_OUT / "upgrade.exe"
+    log(f"打包 stub 源码: → {output_zip}")
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    if output_zip.exists():
+        output_zip.unlink()
 
-    need_rebuild = force or not (uninstall_exe.exists() and upgrade_exe.exists())
-    if not need_rebuild:
-        log("复用已有 stubs:")
-        log(f"  uninstall.exe ({uninstall_exe.stat().st_size / 1024:.0f} KB)")
-        log(f"  upgrade.exe   ({upgrade_exe.stat().st_size / 1024:.0f} KB)")
-        return uninstall_exe, upgrade_exe
+    count = 0
+    with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED,
+                         compresslevel=9) as zf:
+        for rel, arcname in _STUB_SOURCE_FILES:
+            src = ROOT / rel
+            if not src.exists():
+                raise FileNotFoundError(f"缺少 stub 源码文件: {src}")
+            zf.write(src, arcname)
+            count += 1
 
-    build_script = ROOT / "tools" / "build_stubs.py"
-    if not build_script.exists():
-        raise FileNotFoundError(f"找不到 stub 构建脚本: {build_script}")
+        # ★ 最小化 installer/core/__init__.py
+        zf.writestr(
+            "installer/core/__init__.py",
+            '"""stub 场景下的最小 core 包（避免拖入 pywin32）。"""\n',
+        )
+        count += 1
 
-    log("构建 stubs (uninstall.exe / upgrade.exe)...")
-    cmd = [sys.executable, str(build_script)]
-    if debug:
-        cmd.append("--debug")
-    ret = subprocess.call(cmd, cwd=str(ROOT))
-    if ret != 0:
-        raise RuntimeError(f"stub 构建失败 (exit {ret})")
-
-    if not uninstall_exe.exists() or not upgrade_exe.exists():
-        raise RuntimeError("stub 产物不完整")
-
-    log(f"  uninstall.exe ({uninstall_exe.stat().st_size / 1024:.0f} KB)")
-    log(f"  upgrade.exe   ({upgrade_exe.stat().st_size / 1024:.0f} KB)")
-    return uninstall_exe, upgrade_exe
+    size_kb = output_zip.stat().st_size / 1024
+    log(f"  → {count} 个文件, {size_kb:.0f} KB")
+    return output_zip
 
 
 # --------------------------------------------------------------------------- #
 # 3) 安装器 exe（onefile，内嵌 3 个）
 # --------------------------------------------------------------------------- #
-def build_installer_exe(uninstall_exe: Path,
-                        upgrade_exe: Path,
-                        source_zip: Path,
+def build_installer_exe(source_zip: Path,
+                        stubs_source_zip: Path,
                         version: str,
                         debug: bool) -> Path:
     """
     PyInstaller 打包 installer/ → dist/MaaAuto_Setup.exe（onefile）。
-    内嵌 uninstall.exe + upgrade.exe + source.zip。
+    内嵌 source.zip + stubs_source.zip。
     """
     log("打包安装器 (MaaAuto_Setup.exe) [onefile]...")
 
-    # 准备临时 _embedded 目录（把 3 个文件放一起，方便 --add-data）
     build_embedded = BUILD_DIR / "_embedded"
     if build_embedded.exists():
         shutil.rmtree(build_embedded, ignore_errors=True)
     build_embedded.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy2(uninstall_exe, build_embedded / "uninstall.exe")
-    shutil.copy2(upgrade_exe, build_embedded / "upgrade.exe")
     shutil.copy2(source_zip, build_embedded / "source.zip")
+    shutil.copy2(stubs_source_zip, build_embedded / "stubs_source.zip")
 
     icon = ROOT / "resources" / "icon.ico"
 
@@ -238,12 +253,12 @@ def build_installer_exe(uninstall_exe: Path,
         "--noconfirm", "--clean",
         "--name", "MaaAuto_Setup",
         "--onefile",
+        "--uac-admin",                      # ★ 新增：请求管理员权限，才能写 HKLM
         "--windowed" if not debug else "--console",
         str(ROOT / "installer" / "__main__.py"),
-        # 内嵌 3 个资源
-        "--add-data", f"{build_embedded / 'uninstall.exe'}{os.pathsep}_embedded",
-        "--add-data", f"{build_embedded / 'upgrade.exe'}{os.pathsep}_embedded",
+        # 内嵌 2 个资源
         "--add-data", f"{build_embedded / 'source.zip'}{os.pathsep}_embedded",
+        "--add-data", f"{build_embedded / 'stubs_source.zip'}{os.pathsep}_embedded",
         # i18n
         "--add-data", f"{ROOT / 'installer' / 'i18n'}{os.pathsep}installer/i18n",
         "--add-data", f"{ROOT / 'resources'}{os.pathsep}resources",
@@ -376,13 +391,7 @@ def clean_all(source_dir: Path,
                 log(f"  删 dist/{item.name} 失败: {e}")
 
     # ---- 2. tools/_out + tools/_work_* ----
-    if not keep_stub_output:
-        if STUBS_OUT.exists():
-            log(f"  删 tools/_out/")
-            shutil.rmtree(STUBS_OUT, ignore_errors=True)
-    for p in ROOT.glob("tools/_work_*"):
-        log(f"  删 {p.relative_to(ROOT)}/")
-        shutil.rmtree(p, ignore_errors=True)
+    
 
     # ---- 3. 主程序源码里的 build/ dist/ ----
     if source_dir.exists():
@@ -457,21 +466,18 @@ def main():
             if f.exists():
                 f.unlink(missing_ok=True)
 
-    # 1) stubs
-    uninstall_exe, upgrade_exe = build_stubs(
-        force=not args.no_stub_rebuild,
-        debug=args.debug,
-    )
-
-    # 2) source.zip
+    # 1) source.zip（主程序源码）
     source_zip = EMBEDDED_DIR / "source.zip"
     build_source_zip(source_dir, source_zip)
 
+    # 2) stubs_source.zip（stub 源码，供用户端本地打包）
+    stubs_source_zip = EMBEDDED_DIR / "stubs_source.zip"
+    build_stubs_source_zip(stubs_source_zip)
+
     # 3) 安装器 exe
     built_exe = build_installer_exe(
-        uninstall_exe=uninstall_exe,
-        upgrade_exe=upgrade_exe,
         source_zip=source_zip,
+        stubs_source_zip=stubs_source_zip,
         version=installer_version,
         debug=args.debug,
     )
