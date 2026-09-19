@@ -38,6 +38,7 @@ class WelcomePage(BasePage):
         lang_row = QHBoxLayout()
         lang_row.setSpacing(10)
         self.lang_label = QLabel(self.i18n.t("page.welcome.lang_label"))
+        self.lang_label.setObjectName("PageFieldLabel")
         lang_row.addWidget(self.lang_label)
 
         self.lang_combo = QComboBox()
@@ -64,7 +65,6 @@ class WelcomePage(BasePage):
         self.desc.setText(self.i18n.t("page.welcome.desc"))
         self.intro.setText(self.i18n.t("page.welcome.intro"))
         self.lang_label.setText(self.i18n.t("page.welcome.lang_label"))
-        # 刷新语言名（可能用户切换后回到这页）
         self.lang_combo.blockSignals(True)
         for i, (_code, display) in enumerate(self.i18n.available()):
             if i < self.lang_combo.count():

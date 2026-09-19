@@ -11,18 +11,19 @@ from typing import Optional
 class InstallState:
     # ---- 用户选择 ----
     install_dir: Optional[Path] = None
-    mirror: str = ""                     # "" = auto；否则是 key 或完整 URL
+    mirror: str = ""
     create_desktop_shortcut: bool = True
     create_startmenu_shortcut: bool = True
     cleanup_after_install: bool = True
     launch_after_install: bool = True
 
     # ---- 临时工作目录（安装成功后整体删除）----
-    work_dir: Optional[Path] = None       # <temp>/MaaAuto_build_xxx
-    python_dir: Optional[Path] = None     # work_dir/python
-    python_exe: Optional[Path] = None     # work_dir/python/python.exe
-    source_dir: Optional[Path] = None     # work_dir/source
-    dist_app_dir: Optional[Path] = None   # work_dir/source/dist/MaaAuto
+    work_dir: Optional[Path] = None
+    work_dir_cleaned: bool = False        # ★ 新增：是否已成功清理
+    python_dir: Optional[Path] = None
+    python_exe: Optional[Path] = None
+    source_dir: Optional[Path] = None
+    dist_app_dir: Optional[Path] = None
 
     # ---- 从源码读到的信息 ----
     app_version: str = ""
@@ -36,7 +37,7 @@ class InstallState:
     stage: str = ""
     log_lines: list = field(default_factory=list)
 
-    # ---- 兼容字段（旧代码可能引用）----
+    # ---- 兼容字段 ----
     python_exe_console: Optional[Path] = None
     python_version: str = ""
     python_source: str = "bundled"

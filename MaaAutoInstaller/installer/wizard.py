@@ -15,16 +15,6 @@ LOG = logging.getLogger("MaaAutoInstaller")
 
 
 class Wizard(QDialog):
-    """
-    安装向导主窗口。
-
-    页面结构：
-        0  欢迎
-        1  选择目录
-        2  选项
-        3  进度
-        4  完成
-    """
 
     def __init__(self, i18n, parent=None):
         super().__init__(parent)
@@ -34,22 +24,19 @@ class Wizard(QDialog):
         self._index = 0
 
         self.setWindowTitle(i18n.t("wizard.title"))
-        self.setMinimumSize(640, 480)
-        self.resize(700, 520)
+        self.setMinimumSize(660, 500)
+        self.resize(720, 560)
 
         self._setup_ui()
         self._build_pages()
         self._show_page(0)
 
     # ------------------------------------------------------------------ #
-    # UI 骨架
-    # ------------------------------------------------------------------ #
     def _setup_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ---- 顶部标题栏 ----
         header = QWidget()
         header.setObjectName("WizardHeader")
         hl = QHBoxLayout(header)
@@ -69,22 +56,20 @@ class Wizard(QDialog):
 
         line = QFrame()
         line.setObjectName("WizardLine")
-        line.setFrameShape(QFrame.HLine)
+        line.setFrameShape(QFrame.NoFrame)
         line.setFixedHeight(1)
         root.addWidget(line)
 
-        # ---- 中间内容 ----
         self.stack = QStackedWidget()
         self.stack.setObjectName("WizardStack")
         root.addWidget(self.stack, 1)
 
         line2 = QFrame()
         line2.setObjectName("WizardLine")
-        line2.setFrameShape(QFrame.HLine)
+        line2.setFrameShape(QFrame.NoFrame)
         line2.setFixedHeight(1)
         root.addWidget(line2)
 
-        # ---- 底部按钮栏 ----
         footer = QWidget()
         footer.setObjectName("WizardFooter")
         fl = QHBoxLayout(footer)
@@ -119,12 +104,9 @@ class Wizard(QDialog):
         root.addWidget(footer)
 
     # ------------------------------------------------------------------ #
-    # 页面构建
-    # ------------------------------------------------------------------ #
     def _build_pages(self):
         classes = self._import_pages()
         if classes is None:
-            # 批次 4 之前用占位页兜底
             LOG.warning("installer.pages 尚未提供完整页面，使用占位页。")
             titles = ("page.welcome.title", "page.dir.title",
                       "page.options.title", "page.progress.title",
@@ -153,8 +135,6 @@ class Wizard(QDialog):
             LOG.warning("导入页面失败: %s", e)
             return None
 
-    # ------------------------------------------------------------------ #
-    # 页面切换
     # ------------------------------------------------------------------ #
     def _show_page(self, index):
         if index < 0 or index >= len(self._pages):
@@ -191,9 +171,16 @@ class Wizard(QDialog):
         self.btn_next.setVisible((not is_progress) and (not is_last))
         self.btn_finish.setVisible(is_last)
 
-        if is_progress:
+        # 中止中：禁用按钮
+        aborting = is_progress and getattr(page, "is_aborting", lambda: False)()
+        if aborting:
+            self.btn_cancel.setEnabled(False)
+            self.btn_cancel.setText(self.i18n.t("wizard.aborting"))
+        elif is_progress:
+            self.btn_cancel.setEnabled(True)
             self.btn_cancel.setText(self.i18n.t("wizard.abort"))
         else:
+            self.btn_cancel.setEnabled(True)
             self.btn_cancel.setText(self.i18n.t("wizard.cancel"))
 
         if not is_progress and not is_last:
@@ -203,8 +190,11 @@ class Wizard(QDialog):
                 can = True
             self.btn_next.setEnabled(bool(can))
 
-    # ------------------------------------------------------------------ #
-    # 按钮事件
+    def set_cancel_text(self, text):
+        """进度页调用，用于把按钮改成'正在中止...'。"""
+        self.btn_cancel.setText(text)
+        self.btn_cancel.setEnabled(False)
+
     # ------------------------------------------------------------------ #
     def _on_next(self):
         page = self._pages[self._index]
@@ -229,44 +219,55 @@ class Wizard(QDialog):
 
     def _on_cancel(self):
         page = self._pages[self._index]
+        is_progress = getattr(page, "is_progress", False)
+
         try:
             page.on_cancel()
         except Exception:
             LOG.exception("on_cancel 异常")
+
+        if is_progress:
+            # 进度页：worker 会在 done 信号里主动关窗口，这里不 reject
+            return
+
         self.reject()
 
     def _on_finish(self):
         self.accept()
 
     # ------------------------------------------------------------------ #
-    # 关闭事件（用户点 X）
-    # ------------------------------------------------------------------ #
     def closeEvent(self, event):
-        # 进度页：走中止逻辑
-        if self._index < len(self._pages):
-            page = self._pages[self._index]
-            if getattr(page, "is_progress", False):
-                self._on_cancel()
-                event.accept()
-                return
+        page = self._pages[self._index] if self._index < len(self._pages) else None
+        is_progress = page is not None and getattr(page, "is_progress", False)
+
+        if not is_progress:
+            event.accept()
+            return
+
+        # 已经在中止中：忽略本次关闭
+        if getattr(page, "is_aborting", lambda: False)():
+            event.ignore()
+            return
 
         reply = QMessageBox.question(
             self,
-            self.i18n.t("wizard.cancel.confirm.title"),
-            self.i18n.t("wizard.cancel.confirm.msg"),
+            self.i18n.t("wizard.abort.confirm.title"),
+            self.i18n.t("wizard.abort.confirm.msg"),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            event.accept()
+            try:
+                page.on_cancel()
+            except Exception:
+                LOG.exception("on_cancel 异常")
+            # 不立即关，等 worker 结束
+            event.ignore()
         else:
             event.ignore()
 
     # ------------------------------------------------------------------ #
-    # 语言切换
-    # ------------------------------------------------------------------ #
     def set_language(self, lang_code):
-        """供欢迎页切换语言时调用。"""
         if not self.i18n.load(lang_code):
             return
         self.retranslate()
@@ -284,11 +285,8 @@ class Wizard(QDialog):
         self.btn_back.setText(self.i18n.t("wizard.back"))
         self.btn_next.setText(self.i18n.t("wizard.next"))
         self.btn_finish.setText(self.i18n.t("wizard.finish"))
-        # btn_cancel 由 _update_buttons 决定文字
 
 
-# --------------------------------------------------------------------------- #
-# 占位页（批次 4 用真页面替换）
 # --------------------------------------------------------------------------- #
 class _PlaceholderPage(BasePage):
     def __init__(self, i18n, state, title):

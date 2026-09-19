@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
+# 保护名单：这些顶层项不会被 dist 产物覆盖（用户数据 / 元数据）
+# 注意：只匹配 install_dir 顶层的名字，不递归
+DEFAULT_PROTECTED_NAMES = {
+    "config",          # 用户配置
+    "logs",            # 用户日志
+    ".maaauto.json",   # 安装元数据
+}
+
+
 def _log(logger, msg):
     if logger:
         try:
@@ -55,22 +64,20 @@ def build_main_program(
             _log(log, f"清空旧目录: {p.name}")
             shutil.rmtree(p, ignore_errors=True)
 
-    # 执行 build.py（windowed 模式下 PyInstaller 会输出到 stdout，
-    # 但 PyInstaller 本身不弹窗，所以在这里是安全的）
     cmd = [str(python_exe), str(build_script)]
     if extra_args:
         cmd += list(extra_args)
 
     _log(log, f"命令: {' '.join(cmd)}")
-    _log(log, "打包主程序（可能耗时 1~5 分钟）...")
+    _log(log, "打包主程序（可能耗时几分钟）...")
 
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     # 关掉 PyInstaller 的 UPX 压缩，避免杀软误报
     env["PYI_DISABLE_UPX"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"           # ← 新增
-    env["PYTHONLEGACYWINDOWSSTDIO"] = "0"       # ← 新增
-    env["PYTHONUTF8"] = "1"                     # ← 新增
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
+    env["PYTHONUTF8"] = "1"
 
     try:
         proc = subprocess.Popen(
@@ -101,22 +108,17 @@ def build_main_program(
         proc.kill()
         raise RuntimeError(f"打包超时（{timeout} 秒）")
 
-    if proc.returncode != 0:
-        raise RuntimeError(f"build.py 退出码 {proc.returncode}（打包失败）")
-
-    # 校验输出
+    # ---- 校验输出：产物存在 = 成功，产物不存在 = 失败 ----
     out_dir = dist_dir / "MaaAuto"
     out_exe = out_dir / "MaaAuto.exe"
 
     if not out_exe.exists():
-        # 真失败：产物不存在才 raise
         raise RuntimeError(
             f"build.py 退出码 {proc.returncode}，且未找到产物: {out_exe}\n"
             f"请检查 build.py 是否生成 dist/MaaAuto/MaaAuto.exe"
         )
 
     if proc.returncode != 0:
-        # build.py 有报错但产物存在：警告，继续
         _log(log, f"⚠ build.py 返回码 {proc.returncode}，但产物已生成，继续安装")
 
     _log(log, f"打包完成: {out_dir}")
@@ -127,10 +129,16 @@ def copy_dist_to_install(
     dist_app_dir: Path,
     install_dir: Path,
     log: Optional[Callable[[str], None]] = None,
+    protected_names: Optional[set] = None,
 ) -> int:
     """
     把 dist/MaaAuto/ 里的所有内容拷到 install_dir/。
     覆盖同名文件（不删除 install_dir 里已有的其他文件）。
+
+    :param protected_names: 顶层名字黑名单。这些名字**不删、不覆盖**，
+                            用于保护用户数据（config/ logs/ .maaauto.json）。
+                            默认 DEFAULT_PROTECTED_NAMES。
+    :return: 复制的文件数
     """
     dist_app_dir = Path(dist_app_dir).resolve()
     install_dir = Path(install_dir).resolve()
@@ -139,10 +147,22 @@ def copy_dist_to_install(
     if not dist_app_dir.exists():
         raise FileNotFoundError(f"打包产物不存在: {dist_app_dir}")
 
+    if protected_names is None:
+        protected_names = DEFAULT_PROTECTED_NAMES
+    protected_lower = {n.lower() for n in protected_names}
+
     _log(log, f"复制产物: {dist_app_dir} → {install_dir}")
+    _log(log, f"保护名单: {sorted(protected_names)}")
 
     copied = 0
+    skipped = 0
     for item in dist_app_dir.iterdir():
+        # ★ 保护名单检查（大小写不敏感，Windows 友好）
+        if item.name.lower() in protected_lower:
+            _log(log, f"  跳过受保护项: {item.name}")
+            skipped += 1
+            continue
+
         dst = install_dir / item.name
         if item.is_dir():
             if dst.exists():
@@ -155,5 +175,8 @@ def copy_dist_to_install(
             shutil.copy2(item, dst)
             copied += 1
 
-    _log(log, f"已复制 {copied} 个文件")
+    msg = f"已复制 {copied} 个文件"
+    if skipped:
+        msg += f"（跳过 {skipped} 个受保护项）"
+    _log(log, msg)
     return copied

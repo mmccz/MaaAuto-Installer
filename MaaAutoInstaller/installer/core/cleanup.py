@@ -3,10 +3,19 @@
   - remove_work_dir：删除整个临时工作目录（Python + 源码 + dist）
   - clean_pip_cache：清理用户全局 pip 缓存（可选，节省磁盘）
   - clean_system_temp：清理系统临时目录里我们产生的文件
+
+清理失败的兜底策略（重要）：
+  ① 直接 shutil.rmtree
+  ② 等 1.5 秒再试（杀软/子进程可能刚释放句柄）
+  ③ cmd /c rmdir /s /q 强删
+  ④ 写 VBS 到 %TEMP%，3 秒后隐藏执行强删（最可靠的最后手段）
 """
 
 import os
+import sys
+import time
 import shutil
+import tempfile
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -28,6 +37,8 @@ def remove_work_dir(work_dir: Path,
     """
     删除整个临时工作目录。这是安装成功后的核心清理动作。
     包含：Python 环境、源码、pip 装的所有依赖、dist 产物。
+
+    :return: True 表示本次已删除；False 表示安排了延迟清理（或彻底失败）
     """
     if not work_dir:
         return False
@@ -36,15 +47,97 @@ def remove_work_dir(work_dir: Path,
         return False
 
     _log(log, f"删除临时工作目录: {work_dir}")
+
+    # ---- ① 直接删 ----
     try:
         shutil.rmtree(work_dir, ignore_errors=False)
         _log(log, "已删除")
         return True
     except Exception as e:
-        # 有些文件可能被占用，退化为忽略错误重试
-        _log(log, f"部分文件删除失败（重试）: {e}")
-        shutil.rmtree(work_dir, ignore_errors=True)
-        return not work_dir.exists()
+        _log(log, f"直接删除失败: {e}")
+
+    # ---- ② 等一会儿再试（杀软 / 子进程可能刚释放句柄） ----
+    time.sleep(1.5)
+    try:
+        shutil.rmtree(work_dir, ignore_errors=False)
+        _log(log, "重试删除成功")
+        return True
+    except Exception:
+        pass
+
+    # ---- ③ cmd rmdir 强删 ----
+    try:
+        subprocess.run(
+            ["cmd", "/c", "rmdir", "/s", "/q", str(work_dir)],
+            creationflags=0x08000000 if os.name == "nt" else 0,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        if not work_dir.exists():
+            _log(log, "已通过 cmd 强删")
+            return True
+    except Exception:
+        pass
+
+    # ---- ④ VBS 延迟删除（最后的兜底） ----
+    try:
+        vbs = _schedule_vbs_delete(work_dir)
+        _log(log, f"部分文件被占用，已安排延迟清理: {vbs.name}")
+        return False
+    except Exception as e:
+        _log(log, f"延迟清理安排失败: {e}")
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# VBS 延迟删除
+# --------------------------------------------------------------------------- #
+def _schedule_vbs_delete(target: Path) -> Path:
+    """
+    写一个 VBS 到 %TEMP%，隐藏执行，等 3 秒后强删 target 目录，再自删。
+    （wscript.exe 从 XP 起就自带，绝对可靠）
+    """
+    target = Path(target).resolve()
+    ts = int(time.time())
+    vbs_path = Path(tempfile.gettempdir()) / f"MaaAuto_cleanup_{ts}.vbs"
+
+    content = f'''Option Explicit
+Dim fso, target
+Set fso = CreateObject("Scripting.FileSystemObject")
+target = "{target}"
+
+WScript.Sleep 3000
+
+On Error Resume Next
+If fso.FolderExists(target) Then
+    fso.DeleteFolder target, True
+End If
+On Error Goto 0
+
+On Error Resume Next
+fso.DeleteFile WScript.ScriptFullName, True
+On Error Goto 0
+'''
+    # 中文系统按 ANSI(GBK) 解码，用 GBK 写
+    try:
+        vbs_path.write_text(content, encoding="gbk", errors="replace")
+    except Exception:
+        vbs_path.write_text(content, encoding="utf-8-sig")
+
+    FLAGS = 0x08000000 | 0x00000008   # CREATE_NO_WINDOW | DETACHED_PROCESS
+    for exe in ("wscript.exe", "cscript.exe"):
+        try:
+            subprocess.Popen(
+                [exe, "//B", "//Nologo", str(vbs_path)],
+                creationflags=FLAGS,
+                close_fds=True,
+                cwd=str(Path(tempfile.gettempdir())),
+            )
+            return vbs_path
+        except FileNotFoundError:
+            continue
+    raise RuntimeError("系统缺少 wscript.exe / cscript.exe")
 
 
 # --------------------------------------------------------------------------- #
@@ -59,7 +152,6 @@ def clean_pip_cache(python_exe: Optional[Path] = None,
     """
     removed = 0
 
-    # 1) 让 pip 自己清
     if python_exe and Path(python_exe).exists():
         try:
             subprocess.run(
@@ -72,7 +164,6 @@ def clean_pip_cache(python_exe: Optional[Path] = None,
         except Exception:
             pass
 
-    # 2) 直接删目录
     try:
         local = os.environ.get("LOCALAPPDATA")
         if local:
@@ -90,13 +181,12 @@ def clean_pip_cache(python_exe: Optional[Path] = None,
 # --------------------------------------------------------------------------- #
 # 清理系统临时目录里我们产生的文件
 # --------------------------------------------------------------------------- #
-def clean_system_temp(pattern_prefixes=("MaaAuto_", "maaauto_"),
+def clean_system_temp(pattern_prefixes=("MaaAuto_", "maaauto_", ".MaaAuto_"),
                      log: Optional[Callable[[str], None]] = None) -> int:
     """
-    删除 %TEMP% 下以 MaaAuto_ / maaauto_ 开头的文件/目录。
-    （比如 PyInstaller onefile 的解压目录、日志等）
+    删除 %TEMP% 下以 MaaAuto_ / maaauto_ / .MaaAuto_ 开头的文件/目录。
+    包含：PyInstaller onefile 解压目录、我们写的清理 VBS、日志等。
     """
-    import tempfile
     temp = Path(tempfile.gettempdir())
     if not temp.exists():
         return 0
@@ -108,7 +198,9 @@ def clean_system_temp(pattern_prefixes=("MaaAuto_", "maaauto_"),
             continue
         try:
             if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
+                # 目录也可能被占用，用同一套兜底逻辑
+                if not _rmtree_with_fallback(item):
+                    continue
             else:
                 item.unlink(missing_ok=True)
             removed += 1
@@ -121,6 +213,31 @@ def clean_system_temp(pattern_prefixes=("MaaAuto_", "maaauto_"),
         except Exception:
             pass
     return removed
+
+
+def _rmtree_with_fallback(path: Path) -> bool:
+    """内部使用的轻量兜底删除。不写 VBS，避免无限套娃。"""
+    try:
+        shutil.rmtree(path, ignore_errors=False)
+        return True
+    except Exception:
+        pass
+    time.sleep(0.3)
+    try:
+        shutil.rmtree(path, ignore_errors=False)
+        return True
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["cmd", "/c", "rmdir", "/s", "/q", str(path)],
+            creationflags=0x08000000 if os.name == "nt" else 0,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        return not path.exists()
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #

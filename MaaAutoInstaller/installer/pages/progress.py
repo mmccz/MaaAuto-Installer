@@ -3,18 +3,18 @@
 import os
 import re
 import sys
+import ctypes
 import tempfile
 import traceback
 from pathlib import Path
 
-from PySide6.QtWidgets import (QVBoxLayout, QLabel, QProgressBar,
+from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
                                QTextEdit, QMessageBox)
-from PySide6.QtCore import QThread, Signal, QTimer
+from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtGui import QTextCursor
 
 from installer.pages.base import BasePage
-from installer.core import (download_file,
-                            resolve_pypi_mirror, resolve_python_mirror,
+from installer.core import (resolve_pypi_mirror, resolve_python_mirror,
                             unpack_source, hash_requirements,
                             install_embedded_python, verify_python,
                             get_python_version, PYTHON_VERSION,
@@ -43,30 +43,54 @@ def _meipass_dir() -> Path:
 
 
 def _find_source_zip() -> Path:
-    """MaaAuto_Source.zip 与安装器同级。"""
-    p = _exe_dir() / "MaaAuto_Source.zip"
-    if p.exists():
-        return p
-    # 开发兜底
+    """
+    查找 source.zip（按优先级）：
+      ① 打包后：_MEIPASS/_embedded/source.zip（内嵌）
+      ② 开发时：<exe同级>/_embedded/source.zip
+      ③ 兼容旧版：<exe同级>/MaaAuto_Source.zip
+    """
+    # ① 内嵌（打包后）
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = Path(meipass) / "_embedded" / "source.zip"
+        if p.exists():
+            return p
+
+    # ② 开发：<exe同级>/_embedded/source.zip
     p = _exe_dir() / "_embedded" / "source.zip"
     if p.exists():
         return p
+
+    # ③ 兼容旧版布局
+    p = _exe_dir() / "MaaAuto_Source.zip"
+    if p.exists():
+        return p
+
     raise FileNotFoundError(
-        "找不到 MaaAuto_Source.zip\n"
-        "请确保它与 MaaAuto_Setup.exe 在同一目录。"
+        "找不到 source.zip。\n"
+        "若从源码运行，请确保 _embedded/source.zip 存在；\n"
+        "若运行打包好的 exe，说明打包时内嵌失败，请重新构建。"
     )
 
 
 def _find_embedded_stub(name: str) -> Path:
-    """从内嵌取 uninstall.exe / upgrade.exe。"""
     p = _meipass_dir() / "_embedded" / name
     if p.exists():
         return p
-    # 开发兜底：tools/_out/
     p = _exe_dir() / "tools" / "_out" / name
     if p.exists():
         return p
     raise FileNotFoundError(f"找不到内嵌 {name}（请先运行 tools/build_stubs.py）")
+
+
+def _set_hidden(path: Path):
+    """把目录设为隐藏（Windows 资源管理器默认看不到）。"""
+    try:
+        FILE_ATTRIBUTE_HIDDEN = 0x02
+        ctypes.windll.kernel32.SetFileAttributesW(str(path),
+                                                  FILE_ATTRIBUTE_HIDDEN)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -80,25 +104,80 @@ class _InterruptedError(Exception):
 # 后台安装 Worker
 # --------------------------------------------------------------------------- #
 class InstallWorker(QThread):
+    """
+    安装工作线程。
+
+    进度模型：把整个安装切成若干"阶段"，每个阶段有固定权重（加起来 = 100）。
+    阶段内部有一个 0.0~1.0 的子进度，最终百分比 = 阶段起点 + 权重 * 子进度。
+    """
     log_signal = Signal(str)
     stage_signal = Signal(str)
-    progress_signal = Signal(int, int)
+    overall_signal = Signal(int)
+    pip_count_signal = Signal(int, int)
     done_signal = Signal(bool, str)
+
+    STAGE_LAYOUT = [
+        ("page.progress.stage.prepare",              2),
+        ("page.progress.stage.download_python",      8),
+        ("page.progress.stage.unpack_source",        3),
+        ("page.progress.stage.install_deps",        28),
+        ("page.progress.stage.install_pyinstaller",  5),
+        ("page.progress.stage.build_main",          37),
+        ("page.progress.stage.deploy_stubs",         3),
+        ("page.progress.stage.create_shortcut",      3),
+        ("page.progress.stage.write_manifest",       2),
+        ("page.progress.stage.cleanup",              8),
+        ("page.progress.stage.done",                 1),
+    ]
 
     def __init__(self, state, installer_version: str, parent=None):
         super().__init__(parent)
         self.state = state
         self.installer_version = installer_version
 
+        self._bounds = {}
+        running = 0
+        for key, weight in self.STAGE_LAYOUT:
+            self._bounds[key] = (running, weight)
+            running += weight
+
+        self._cur_key = None
+        self._cur_frac = 0.0
+        self._last_pct = -1
+
+        self._pip_seen = set()
+        self._pip_collected = 0
+        self._pip_estimate = 40
+
+        self._build_lines = 0
+
     # ---- 便捷回调 ----
     def _log(self, msg):
         self.log_signal.emit(str(msg))
 
-    def _stage(self, key):
+    def _stage(self, key: str):
+        self._cur_key = key
+        self._cur_frac = 0.0
         self.stage_signal.emit(key)
+        self._emit_overall()
 
-    def _progress(self, cur, total):
-        self.progress_signal.emit(int(cur), int(total))
+    def _sub(self, frac: float):
+        self._cur_frac = max(0.0, min(1.0, float(frac)))
+        self._emit_overall()
+
+    def _advance(self):
+        self._cur_frac = 1.0
+        self._emit_overall()
+
+    def _emit_overall(self):
+        if self._cur_key is None:
+            return
+        start, weight = self._bounds.get(self._cur_key, (0, 0))
+        pct = int(round(start + weight * self._cur_frac))
+        if pct == self._last_pct:
+            return
+        self._last_pct = pct
+        self.overall_signal.emit(pct)
 
     def _check(self):
         if self.isInterruptionRequested():
@@ -130,162 +209,242 @@ class InstallWorker(QThread):
             pass
         return "0.0.0"
 
+    @staticmethod
+    def _estimate_pip_total(req_file: Path) -> int:
+        try:
+            text = req_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return 40
+        n = 0
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#") or s.startswith("-"):
+                continue
+            n += 1
+        return max(20, n * 3)
+
+    def _on_download_progress(self, cur, total):
+        if total > 0:
+            self._sub(cur / total)
+
+    def _pip_log(self, line):
+        self._log(line)
+        s = line.strip()
+        if s.startswith("Collecting "):
+            rest = s[len("Collecting "):].strip()
+            pkg = rest.split()[0] if rest else ""
+            if pkg and pkg not in self._pip_seen:
+                self._pip_seen.add(pkg)
+                self._pip_collected = len(self._pip_seen)
+                if self._pip_estimate > 0:
+                    self._sub(min(0.9, self._pip_collected / self._pip_estimate))
+                    self.pip_count_signal.emit(self._pip_collected,
+                                               self._pip_estimate)
+
+    def _build_log(self, line):
+        self._log(line)
+        self._build_lines += 1
+        self._sub(min(0.9, self._build_lines / 300))
+
     # ------------------------------------------------------------------ #
     def _do_install(self):
         s = self.state
         install_dir = Path(s.install_dir).resolve()
         install_dir.mkdir(parents=True, exist_ok=True)
 
-        # ---- 0. 准备：创建临时工作目录 ----
-        self._check()
-        self._stage("page.progress.stage.prepare")
-        self._log(f"安装目录: {install_dir}")
-
-        # 工作目录放在 install_dir 的父目录下，确保删除时不出错
-        work_dir = Path(tempfile.mkdtemp(
-            prefix="MaaAuto_build_",
-            dir=str(install_dir.parent),
-        ))
-        s.work_dir = work_dir
-        self._log(f"临时工作目录: {work_dir}")
-        self._log(f"安装器版本: {self.installer_version}")
-
-        # ---- 1. 下载 embeddable Python ----
-        self._check()
-        self._stage("page.progress.stage.download_python")
-        python_dir = work_dir / "python"
-        python_mirror = resolve_python_mirror(s.mirror or "auto", PYTHON_VERSION)
-        self._log(f"Python 镜像: {python_mirror}")
-
-        python_exe, _pythonw, python_dir = install_embedded_python(
-            python_dir, python_mirror,
-            log=self._log, progress=self._progress,
-            temp_dir=work_dir / "_dl",
-        )
-        if not verify_python(python_exe):
-            raise RuntimeError("Python 环境验证失败")
-
-        py_ver = get_python_version(python_exe)
-        self._log(f"Python 就绪: {python_exe} ({py_ver})")
-        s.python_dir = python_dir
-        s.python_exe = python_exe
-        s.python_exe_console = python_exe
-        s.python_version = py_ver
-
-        # ---- 2. 解压源码 ----
-        self._check()
-        self._stage("page.progress.stage.unpack_source")
-        source_zip = _find_source_zip()
-        self._log(f"源码包: {source_zip.name}")
-
-        source_dir = work_dir / "source"
-        unpack_source(source_zip, source_dir, log=self._log)
-        s.source_dir = source_dir
-        s.app_version = self._read_app_version(source_dir)
-        self._log(f"应用版本: {s.app_version}")
-
-        # ---- 3. 装 pip ----
-        self._check()
-        ensure_pip(python_exe, log=self._log, temp_dir=work_dir / "_dl")
-
-        # ---- 4. 装主程序依赖 ----
-        self._check()
-        self._stage("page.progress.stage.install_deps")
-        pypi_url = resolve_pypi_mirror(s.mirror or "auto")
-        req_file = source_dir / "requirements.txt"
-        if req_file.exists():
-            install_requirements(python_exe, req_file, pypi_url, log=self._log)
-            s.requirements_hash = hash_requirements(req_file)
-        else:
-            self._log("未找到 requirements.txt，跳过依赖安装")
-
-        # ---- 5. 装 PyInstaller ----
-        self._check()
-        self._stage("page.progress.stage.install_pyinstaller")
-        install_pyinstaller(python_exe, pypi_url, log=self._log)
-
-        # ---- 6. 本地打包主程序 ----
-        self._check()
-        self._stage("page.progress.stage.build_main")
-        dist_app_dir = build_main_program(
-            source_dir, python_exe, log=self._log, timeout=1800,
-        )
-        s.dist_app_dir = dist_app_dir
-
-        # ---- 7. 拷贝产物到安装目录 ----
-        self._check()
-        copy_dist_to_install(dist_app_dir, install_dir, log=self._log)
-
-        # ---- 8. 释放 uninstall.exe / upgrade.exe ----
-        self._check()
-        self._stage("page.progress.stage.deploy_stubs")
-        uninstall_src = _find_embedded_stub("uninstall.exe")
-        upgrade_src = _find_embedded_stub("upgrade.exe")
-        uninstall_dst = deploy_uninstaller(uninstall_src, install_dir, log=self._log)
-        upgrade_dst = deploy_upgrader(upgrade_src, install_dir, log=self._log)
-
-        # ---- 9. 快捷方式 ----
-        self._check()
-        self._stage("page.progress.stage.create_shortcut")
-        main_exe = install_dir / "MaaAuto.exe"
-        icon_path = install_dir / "resources" / "icon.ico"
-        if not icon_path.exists():
-            # 有些项目资源路径不同，兜底用主 exe 图标
-            icon_path = main_exe
-
-        if s.create_desktop_shortcut:
-            try:
-                p = create_desktop_shortcut(main_exe, install_dir,
-                                            "MaaAuto", icon_path)
-                if p:
-                    self._log(f"桌面快捷方式: {p.name}")
-            except Exception as e:
-                self._log(f"创建桌面快捷方式失败: {e}")
-
-        if s.create_startmenu_shortcut:
-            try:
-                p = create_startmenu_shortcut(main_exe, install_dir,
-                                              "MaaAuto", icon_path)
-                if p:
-                    self._log(f"开始菜单快捷方式: {p.name}")
-            except Exception as e:
-                self._log(f"创建开始菜单快捷方式失败: {e}")
-
-        # ---- 10. 写 manifest ----
-        self._check()
-        self._stage("page.progress.stage.write_manifest")
-        manifest = Manifest(
-            version=s.app_version,
-            installer_version=self.installer_version,
-            install_dir=str(install_dir),
-            app_exe=str(main_exe),
-            uninstall_exe=str(uninstall_dst),
-            upgrade_exe=str(upgrade_dst),
-            requirements_hash=s.requirements_hash,
-            mirror=s.mirror or "",
-            extra={},
-        )
-        write_manifest(install_dir, manifest)
-        self._log(f"元数据: {install_dir / '.maaauto.json'}")
-
-        # ---- 11. 清理 ----
-        if s.cleanup_after_install:
+        work_dir: Path | None = None
+        try:
+            # ---- 0. 准备 ----
             self._check()
-            self._stage("page.progress.stage.cleanup")
-            self._log("清理临时文件...")
-            remove_work_dir(work_dir, log=self._log)
-            clean_pip_cache(python_exe=python_exe, log=self._log)
-            clean_system_temp(log=self._log)
-        else:
-            self._log(f"（跳过了清理，临时目录仍保留在: {work_dir}）")
+            self._stage("page.progress.stage.prepare")
+            self._log(f"安装目录: {install_dir}")
 
-        # ---- 12. 完成 ----
-        self._stage("page.progress.stage.done")
-        self._log("=" * 48)
-        self._log(f"安装完成！MaaAuto {s.app_version}")
-        self._log(f"安装目录: {install_dir}")
-        self._log("=" * 48)
-        s.success = True
+            work_dir = Path(tempfile.mkdtemp(
+                prefix="MaaAuto_build_",
+                dir=str(install_dir.parent),
+            ))
+            _set_hidden(work_dir)
+            s.work_dir = work_dir
+            self._log(f"临时工作目录: {work_dir}")
+            self._log(f"安装器版本: {self.installer_version}")
+            self._advance()
+
+            # ---- 1. 下载 embeddable Python ----
+            self._check()
+            self._stage("page.progress.stage.download_python")
+            python_dir = work_dir / "python"
+            python_mirror = resolve_python_mirror(s.mirror or "auto",
+                                                  PYTHON_VERSION)
+            self._log(f"Python 镜像: {python_mirror}")
+
+            python_exe, _pythonw, python_dir = install_embedded_python(
+                python_dir, python_mirror,
+                log=self._log, progress=self._on_download_progress,
+                temp_dir=work_dir / "_dl",
+            )
+            if not verify_python(python_exe):
+                raise RuntimeError("Python 环境验证失败")
+
+            py_ver = get_python_version(python_exe)
+            self._log(f"Python 就绪: {python_exe} ({py_ver})")
+            s.python_dir = python_dir
+            s.python_exe = python_exe
+            s.python_exe_console = python_exe
+            s.python_version = py_ver
+            self._advance()
+
+            # ---- 2. 解压源码 ----
+            self._check()
+            self._stage("page.progress.stage.unpack_source")
+            source_zip = _find_source_zip()
+            self._log(f"源码包: {source_zip.name}")
+
+            source_dir = work_dir / "source"
+            unpack_source(source_zip, source_dir, log=self._log)
+            s.source_dir = source_dir
+            s.app_version = self._read_app_version(source_dir)
+            self._log(f"应用版本: {s.app_version}")
+            self._advance()
+
+            # ---- 3 + 4. 装 pip + 装主程序依赖 ----
+            self._check()
+            self._stage("page.progress.stage.install_deps")
+
+            req_file = source_dir / "requirements.txt"
+            self._pip_estimate = self._estimate_pip_total(req_file)
+            self._pip_collected = 0
+            self._pip_seen = set()
+
+            ensure_pip(python_exe, log=self._log, temp_dir=work_dir / "_dl")
+
+            pypi_url = resolve_pypi_mirror(s.mirror or "auto")
+            if req_file.exists():
+                install_requirements(python_exe, req_file, pypi_url,
+                                     log=self._pip_log)
+                s.requirements_hash = hash_requirements(req_file)
+            else:
+                self._log("未找到 requirements.txt，跳过依赖安装")
+            self._advance()
+
+            # ---- 5. 装 PyInstaller ----
+            self._check()
+            self._stage("page.progress.stage.install_pyinstaller")
+            install_pyinstaller(python_exe, pypi_url, log=self._log)
+            self._advance()
+
+            # ---- 6 + 7. 打包主程序 + 拷贝产物 ----
+            self._check()
+            self._stage("page.progress.stage.build_main")
+            self._build_lines = 0
+
+            dist_app_dir = build_main_program(
+                source_dir, python_exe, log=self._build_log, timeout=1800,
+            )
+            s.dist_app_dir = dist_app_dir
+            copy_dist_to_install(dist_app_dir, install_dir, log=self._log)
+            self._advance()
+
+            # ---- 8. 释放 uninstall.exe / upgrade.exe ----
+            self._check()
+            self._stage("page.progress.stage.deploy_stubs")
+            uninstall_src = _find_embedded_stub("uninstall.exe")
+            upgrade_src = _find_embedded_stub("upgrade.exe")
+            uninstall_dst = deploy_uninstaller(uninstall_src, install_dir,
+                                               log=self._log)
+            upgrade_dst = deploy_upgrader(upgrade_src, install_dir,
+                                          log=self._log)
+            self._advance()
+
+            # ---- 9. 快捷方式 ----
+            self._check()
+            self._stage("page.progress.stage.create_shortcut")
+            main_exe = install_dir / "MaaAuto.exe"
+            icon_path = install_dir / "resources" / "icon.ico"
+            if not icon_path.exists():
+                icon_path = main_exe
+
+            if s.create_desktop_shortcut:
+                try:
+                    p = create_desktop_shortcut(main_exe, install_dir,
+                                                "MaaAuto", icon_path)
+                    if p:
+                        self._log(f"桌面快捷方式: {p.name}")
+                except Exception as e:
+                    self._log(f"创建桌面快捷方式失败: {e}")
+
+            if s.create_startmenu_shortcut:
+                try:
+                    p = create_startmenu_shortcut(main_exe, install_dir,
+                                                  "MaaAuto", icon_path)
+                    if p:
+                        self._log(f"开始菜单快捷方式: {p.name}")
+                except Exception as e:
+                    self._log(f"创建开始菜单快捷方式失败: {e}")
+            self._advance()
+
+            # ---- 10. 写 manifest ----
+            self._check()
+            self._stage("page.progress.stage.write_manifest")
+            manifest = Manifest(
+                version=s.app_version,
+                installer_version=self.installer_version,
+                install_dir=str(install_dir),
+                app_exe=str(main_exe),
+                uninstall_exe=str(uninstall_dst),
+                upgrade_exe=str(upgrade_dst),
+                requirements_hash=s.requirements_hash,
+                mirror=s.mirror or "",
+                release_channel="stable",
+                # extra 用 Manifest 默认值（见 installer/core/manifest.py）
+                # 这里显式传，双保险
+                extra={
+                    "github_url": "https://github.com/mmccz/MaaAuto-Tool-works",
+                    "update_api": "https://api.github.com/repos/mmccz/MaaAuto-Tool-works/releases/latest",
+                    "release_channel": "stable",
+                    "launch_args": [],
+                    "source_asset_name": "MaaAuto_Source.zip",
+                    "online_asset_pattern": "MaaAuto_Online_*-Windows-x64.exe",
+                    "min_installer_version": "1.0.0",
+                },
+            )
+            write_manifest(install_dir, manifest)
+            self._log(f"元数据: {install_dir / '.maaauto.json'}")
+            self._advance()
+
+            # ---- 11. 完成 ----
+            self._stage("page.progress.stage.done")
+            self._log("=" * 48)
+            self._log(f"安装完成！MaaAuto {s.app_version}")
+            self._log(f"安装目录: {install_dir}")
+            self._log("=" * 48)
+            s.success = True
+            self._advance()
+
+        finally:
+            # ★ 无论成功 / 失败 / 被中止，都尝试清理临时工作目录
+            if work_dir is not None and work_dir.exists():
+                if s.cleanup_after_install:
+                    self._stage("page.progress.stage.cleanup")
+                    self._log("清理临时文件...")
+                    # pip 缓存需要 python.exe 还在，先做
+                    try:
+                        if s.python_exe and Path(s.python_exe).exists():
+                            clean_pip_cache(python_exe=s.python_exe, log=self._log)
+                    except Exception as e:
+                        self._log(f"清理 pip 缓存失败: {e}")
+                    # 删工作目录
+                    try:
+                        remove_work_dir(work_dir, log=self._log)
+                        s.work_dir_cleaned = not work_dir.exists()
+                    except Exception as e:
+                        self._log(f"清理临时目录失败: {e}")
+                    # 清系统临时目录
+                    try:
+                        clean_system_temp(log=self._log)
+                    except Exception:
+                        pass
+                else:
+                    self._log(f"（跳过了清理，临时目录仍保留在: {work_dir}）")
 
 
 # --------------------------------------------------------------------------- #
@@ -296,20 +455,30 @@ class ProgressPage(BasePage):
     is_progress = True
     LOG_FLUSH_MS = 150
     LOG_MAX_BLOCKS = 4000
+    ANIM_INTERVAL_MS = 30
 
     def __init__(self, i18n, state, parent=None):
         super().__init__(i18n, state, parent)
         self.worker = None
         self._installed = False
+        self._aborting = False
         self._log_buffer = []
         self._trim_counter = 0
+
+        self._display_pct = 0
+        self._target_pct = 0
 
         self._log_timer = QTimer(self)
         self._log_timer.setInterval(self.LOG_FLUSH_MS)
         self._log_timer.timeout.connect(self._flush_logs)
         self._log_timer.setSingleShot(True)
 
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(self.ANIM_INTERVAL_MS)
+        self._anim_timer.timeout.connect(self._anim_tick)
+
         self._setup_ui()
+        self._anim_timer.start()
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -327,14 +496,25 @@ class ProgressPage(BasePage):
 
         root.addSpacing(4)
 
+        stage_row = QHBoxLayout()
+        stage_row.setSpacing(10)
         self.stage_label = QLabel(self.i18n.t("page.progress.stage.prepare"))
         self.stage_label.setObjectName("PageStage")
-        root.addWidget(self.stage_label)
+        stage_row.addWidget(self.stage_label, 1)
+
+        self.pct_label = QLabel("0%")
+        self.pct_label.setObjectName("PagePct")
+        self.pct_label.setFixedWidth(48)
+        self.pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        stage_row.addWidget(self.pct_label)
+        root.addLayout(stage_row)
 
         self.bar = QProgressBar()
-        self.bar.setRange(0, 0)
+        self.bar.setObjectName("MainProgress")
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
         self.bar.setTextVisible(False)
-        self.bar.setFixedHeight(8)
+        self.bar.setFixedHeight(10)
         root.addWidget(self.bar)
 
         self.eta_hint = QLabel(self.i18n.t("page.progress.eta_hint"))
@@ -360,13 +540,31 @@ class ProgressPage(BasePage):
         self.worker = InstallWorker(self.state, installer_version, self)
         self.worker.log_signal.connect(self._on_log)
         self.worker.stage_signal.connect(self._on_stage)
-        self.worker.progress_signal.connect(self._on_progress)
+        self.worker.overall_signal.connect(self._on_overall)
+        self.worker.pip_count_signal.connect(self._on_pip_count)
         self.worker.done_signal.connect(self._on_done)
         self.worker.start()
 
+    def is_aborting(self) -> bool:
+        return self._aborting
+
     def on_cancel(self):
+        """用户点中止/关窗口。只发信号，等 worker 结束再关窗口。"""
+        if self._aborting:
+            return
+        self._aborting = True
+        # 更新中止按钮文字
+        w = self.window()
+        if hasattr(w, "set_cancel_text"):
+            w.set_cancel_text(self.i18n.t("wizard.aborting"))
         if self.worker is not None and self.worker.isRunning():
             self.worker.requestInterruption()
+            self._append_line_safe(
+                self.i18n.t("page.progress.aborting_log")
+            )
+        else:
+            # worker 已结束，直接关闭
+            QTimer.singleShot(0, lambda: self.window().reject())
 
     def can_next(self):
         return self._installed
@@ -411,23 +609,42 @@ class ProgressPage(BasePage):
             cursor.removeSelectedText()
             cursor.deleteChar()
 
+    # ------------------------------------------------------------------ #
+    # 进度
+    # ------------------------------------------------------------------ #
     def _on_stage(self, key):
         self.stage_label.setText(self.i18n.t(key))
 
-    def _on_progress(self, cur, total):
-        if total > 0:
-            self.bar.setRange(0, total)
-            self.bar.setValue(cur)
+    def _on_pip_count(self, current, total):
+        if self.worker is not None and self.worker._cur_key == \
+                "page.progress.stage.install_deps":
+            key = "page.progress.stage.install_deps.with_count"
+            self.stage_label.setText(
+                self.i18n.t(key, current=current, total=total)
+            )
+
+    def _on_overall(self, pct):
+        self._target_pct = max(0, min(100, int(pct)))
+
+    def _anim_tick(self):
+        if self._display_pct == self._target_pct:
+            return
+        diff = self._target_pct - self._display_pct
+        if diff > 0:
+            step = max(1, diff // 6)
+            self._display_pct = min(self._target_pct,
+                                    self._display_pct + step)
         else:
-            self.bar.setRange(0, 0)
+            self._display_pct = self._target_pct
+        self.bar.setValue(self._display_pct)
+        self.pct_label.setText(f"{self._display_pct}%")
 
     # ------------------------------------------------------------------ #
     def _on_done(self, success, error):
         self._flush_logs()
         self._installed = success
         if success:
-            self.bar.setRange(0, 1)
-            self.bar.setValue(1)
+            self._target_pct = 100
 
         w = self.window()
         if hasattr(w, "_update_buttons"):
@@ -440,10 +657,17 @@ class ProgressPage(BasePage):
                 QTimer.singleShot(400, self._launch_now)
         else:
             if error == "__ABORTED__":
-                self._append_line_safe(
-                    "\n[已中止] 安装未完成。"
-                    f"\n临时目录保留在: {self.state.work_dir}"
-                )
+                if getattr(self.state, "work_dir_cleaned", False):
+                    self._append_line_safe(
+                        self.i18n.t("page.progress.aborted_cleaned")
+                    )
+                else:
+                    wd = self.state.work_dir
+                    self._append_line_safe(
+                        self.i18n.t("page.progress.aborted_kept", dir=str(wd))
+                    )
+                # 中止后自动关窗口
+                QTimer.singleShot(400, lambda: self.window().reject())
             else:
                 QMessageBox.critical(
                     self, self.i18n.t("error.title"),

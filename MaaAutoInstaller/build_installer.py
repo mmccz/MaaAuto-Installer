@@ -1,22 +1,22 @@
 """
-MaaAutoInstaller 一键构建脚本。
+MaaAutoInstaller 一键构建脚本（单 exe 版）。
 
 流程：
-  1. 打包 ../MaaAutoProject/ 为 _embedded/source.zip
-  2. 调用 tools/build_stubs.py 打包 uninstall.exe / upgrade.exe
-  3. PyInstaller 打包 installer/ → dist/MaaAuto_Setup.exe（onefile）
-       内嵌 uninstall.exe + upgrade.exe（用户端必需）
-  4. 组合最终交付 zip：
-        MaaAuto_Setup.exe        安装器
-        MaaAuto_Source.zip       源码（安装器同级读取）
-        README.txt
+  1. 打包主程序源码 → _embedded/source.zip（临时）
+  2. 打包 stubs → tools/_out/uninstall.exe + upgrade.exe
+  3. PyInstaller 打包安装器 → dist/MaaAuto_Online_vX.X.X-Windows-x64.exe
+     （onefile，内嵌 source.zip + uninstall.exe + upgrade.exe）
+  4. 默认清理所有中间产物，只留最终 exe
 
 用法：
     python build_installer.py
-    python build_installer.py --source-dir ../MaaAutoProject
-    python build_installer.py --debug
-    python build_installer.py --no-stub-rebuild
-    python build_installer.py --keep-build
+    python build_installer.py --source-dir ../MaaAuto-Tool-works/MaaAutoProject
+    python build_installer.py --debug              # 保留控制台 + 不清理
+    python build_installer.py --keep-build         # 不清理中间产物
+    python build_installer.py --no-stub-rebuild    # 复用已有 stubs（若存在）
+
+产物：
+    dist/MaaAuto_Online_v{app_version}-Windows-x64.exe
 """
 
 import os
@@ -27,6 +27,7 @@ import argparse
 import subprocess
 import zipfile
 from pathlib import Path
+
 
 # --------------------------------------------------------------------------- #
 # 路径
@@ -39,7 +40,32 @@ STUBS_OUT = ROOT / "tools" / "_out"
 SPEC_FILE = ROOT / "MaaAuto_Setup.spec"
 VERSION_FILE = ROOT / "VERSION"
 
-DEFAULT_SOURCE_DIR = ROOT.parent / "MaaAutoProject"
+
+def _find_default_source_dir() -> Path:
+    """
+    探测主程序源码目录。按优先级：
+      1. <ROOT>/../../MaaAuto-Tool-works/MaaAutoProject   ← 主约定（同级工作区）
+      2. <ROOT>/../MaaAuto-Tool-works/MaaAutoProject
+      3. <ROOT>/../MaaAutoProject
+      4. <ROOT>/MaaAutoProject
+    找到含 app_info.py 的目录即采用。
+    """
+    candidates = [
+        ROOT.parent.parent / "MaaAuto-Tool-works" / "MaaAutoProject",
+        ROOT.parent / "MaaAuto-Tool-works" / "MaaAutoProject",
+        ROOT.parent / "MaaAutoProject",
+        ROOT / "MaaAutoProject",
+    ]
+    for c in candidates:
+        try:
+            if c.exists() and (c / "app_info.py").exists():
+                return c.resolve()
+        except Exception:
+            continue
+    return candidates[0]
+
+
+DEFAULT_SOURCE_DIR = _find_default_source_dir()
 
 
 # 打包源码时排除的目录 / 文件后缀
@@ -108,19 +134,16 @@ def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
     if output_zip.exists():
         output_zip.unlink()
 
-    count = 0                                       # ← 这个必须要有
+    count = 0
 
-    with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        # 1) 遍历源码目录
+    with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED,
+                         compresslevel=9) as zf:
         for root, dirs, files in os.walk(source_dir):
             root_path = Path(root)
-
-            # 就地裁剪 dirs（避免深递归）
             dirs[:] = [
                 d for d in dirs
                 if not should_skip(d, root_path / d)
             ]
-
             for fname in files:
                 fpath = root_path / fname
                 if should_skip(fname, fpath):
@@ -129,7 +152,7 @@ def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
                 zf.write(fpath, arcname.as_posix())
                 count += 1
 
-        # 2) 若 source_dir 里没 requirements.txt，尝试从上一级补齐
+        # 补齐 requirements.txt
         req_in_source = source_dir / "requirements.txt"
         if not req_in_source.exists():
             for candidate in (
@@ -159,7 +182,7 @@ def build_stubs(force: bool, debug: bool):
 
     need_rebuild = force or not (uninstall_exe.exists() and upgrade_exe.exists())
     if not need_rebuild:
-        log(f"复用已有 stubs:")
+        log("复用已有 stubs:")
         log(f"  uninstall.exe ({uninstall_exe.stat().st_size / 1024:.0f} KB)")
         log(f"  upgrade.exe   ({upgrade_exe.stat().st_size / 1024:.0f} KB)")
         return uninstall_exe, upgrade_exe
@@ -185,26 +208,28 @@ def build_stubs(force: bool, debug: bool):
 
 
 # --------------------------------------------------------------------------- #
-# 3) 安装器 exe
+# 3) 安装器 exe（onefile，内嵌 3 个）
 # --------------------------------------------------------------------------- #
 def build_installer_exe(uninstall_exe: Path,
                         upgrade_exe: Path,
+                        source_zip: Path,
                         version: str,
                         debug: bool) -> Path:
     """
     PyInstaller 打包 installer/ → dist/MaaAuto_Setup.exe（onefile）。
-    内嵌 uninstall.exe + upgrade.exe。
-    source.zip 不内嵌（外置）。
+    内嵌 uninstall.exe + upgrade.exe + source.zip。
     """
     log("打包安装器 (MaaAuto_Setup.exe) [onefile]...")
 
-    # 准备临时 _embedded 目录
+    # 准备临时 _embedded 目录（把 3 个文件放一起，方便 --add-data）
     build_embedded = BUILD_DIR / "_embedded"
     if build_embedded.exists():
         shutil.rmtree(build_embedded, ignore_errors=True)
     build_embedded.mkdir(parents=True, exist_ok=True)
+
     shutil.copy2(uninstall_exe, build_embedded / "uninstall.exe")
     shutil.copy2(upgrade_exe, build_embedded / "upgrade.exe")
+    shutil.copy2(source_zip, build_embedded / "source.zip")
 
     icon = ROOT / "resources" / "icon.ico"
 
@@ -215,13 +240,13 @@ def build_installer_exe(uninstall_exe: Path,
         "--onefile",
         "--windowed" if not debug else "--console",
         str(ROOT / "installer" / "__main__.py"),
-        # 内嵌 stubs
+        # 内嵌 3 个资源
         "--add-data", f"{build_embedded / 'uninstall.exe'}{os.pathsep}_embedded",
         "--add-data", f"{build_embedded / 'upgrade.exe'}{os.pathsep}_embedded",
+        "--add-data", f"{build_embedded / 'source.zip'}{os.pathsep}_embedded",
         # i18n
         "--add-data", f"{ROOT / 'installer' / 'i18n'}{os.pathsep}installer/i18n",
-        "--add-data", f"{ROOT / 'resources'}{os.pathsep}resources",   # ← 新增  
-        
+        "--add-data", f"{ROOT / 'resources'}{os.pathsep}resources",
         # hidden imports
         "--hidden-import", "PySide6.QtNetwork",
         "--hidden-import", "win32com",
@@ -298,95 +323,13 @@ VSVersionInfo(
 
 
 # --------------------------------------------------------------------------- #
-# 4) 交付 zip
+# 4) 清理
 # --------------------------------------------------------------------------- #
-def compose_final_zip(installer_exe: Path,
-                     source_zip: Path,
-                     version: str,
-                     app_version: str) -> Path:
-    DIST_DIR.mkdir(parents=True, exist_ok=True)
-    final_zip = DIST_DIR / f"MaaAuto_v{app_version}.zip"
-    if final_zip.exists():
-        final_zip.unlink()
-
-    github_url = _read_github()
-
-    readme = f"""MaaAuto 安装说明
-================
-
-版本：{app_version}
-安装器版本：{version}
-
-【重要】请勿单独移动 MaaAuto_Setup.exe！
-        它需要与 MaaAuto_Source.zip 保持在同一目录。
-
-使用步骤：
-  1. 解压本压缩包到任意目录（保持三个文件在同一文件夹）
-  2. 双击 MaaAuto_Setup.exe 启动安装向导
-  3. 按提示选择安装目录
-  4. 等待安装完成（需联网，约 6-20 分钟）
-  5. 从桌面快捷方式启动 MaaAuto
-
-注意事项：
-  - 安装时会联网下载依赖，建议使用稳定网络
-  - 安装过程中 CPU 占用较高（本地打包主程序），属正常现象
-  - 若杀毒软件误报，请添加信任
-  - 安装完成后会生成卸载器 (uninstall.exe) 和升级器 (upgrade.exe)
-
-系统要求：
-  - Windows 10 / 11 (64 位)
-  - 约 1 GB 磁盘空间
-  - 网络连接
-
-更多信息：{github_url}
-"""
-    readme_tmp = DIST_DIR / "README.txt"
-    readme_tmp.write_text(readme, encoding="utf-8")
-
-    log(f"组合最终压缩包: {final_zip.name}")
-    with zipfile.ZipFile(final_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        zf.write(installer_exe, "MaaAuto_Setup.exe")
-        zf.write(source_zip, "MaaAuto_Source.zip")
-        zf.write(readme_tmp, "README.txt")
-
-    readme_tmp.unlink(missing_ok=True)
-
-    size_mb = final_zip.stat().st_size / (1024 * 1024)
-    log(f"  → {final_zip} ({size_mb:.1f} MB)")
-    return final_zip
-
-
-def _read_github():
-    try:
-        p = DEFAULT_SOURCE_DIR / "app_info.py"
-        if p.exists():
-            text = p.read_text(encoding="utf-8")
-            m = re.search(r'^APP_GITHUB\s*=\s*["\']([^"\']*)["\']', text, re.M)
-            if m:
-                return m.group(1)
-    except Exception:
-        pass
-    return "https://github.com/"
-
-
-# --------------------------------------------------------------------------- #
-# 清理
-# --------------------------------------------------------------------------- #
-def clean_artifacts():
-    for p in (DIST_DIR, BUILD_DIR):
-        if p.exists():
-            log(f"清理 {p}")
-            shutil.rmtree(p, ignore_errors=True)
-    for f in (SPEC_FILE, ROOT / "_installer_version_info.txt"):
-        if f.exists():
-            f.unlink(missing_ok=True)
-
-
 def clean_pycache(root: Path):
+    """清理 root 下所有 __pycache__。"""
     removed = 0
     skip = {".git", "venv", ".venv", "env", "node_modules",
-            "build", "dist", "_embedded", "_launcher_build",
-            "_work_uninstall", "_work_upgrade"}
+            "_embedded", "_work_uninstall", "_work_upgrade"}
     for dirpath, dirnames, _files in os.walk(root, topdown=True):
         dirnames[:] = [d for d in dirnames if d.lower() not in skip]
         if "__pycache__" in dirnames:
@@ -398,36 +341,99 @@ def clean_pycache(root: Path):
         log(f"清理 {removed} 个 __pycache__")
 
 
+def clean_all(source_dir: Path,
+              keep_stub_output: bool = False,
+              keep_final_exe: str = ""):
+    """
+    清理所有中间产物。默认只保留 dist/<keep_final_exe>。
+    """
+    log("清理中间产物...")
+
+    # ---- 1. 安装器项目内 ----
+    for p in (BUILD_DIR, EMBEDDED_DIR):
+        if p.exists():
+            log(f"  删 {p.relative_to(ROOT)}/")
+            shutil.rmtree(p, ignore_errors=True)
+
+    for f in (SPEC_FILE, ROOT / "_installer_version_info.txt"):
+        if f.exists():
+            log(f"  删 {f.name}")
+            f.unlink(missing_ok=True)
+
+    # dist 里除最终 exe 之外
+    if DIST_DIR.exists():
+        for item in list(DIST_DIR.iterdir()):
+            if keep_final_exe and item.name == keep_final_exe:
+                continue
+            try:
+                if item.is_dir():
+                    log(f"  删 dist/{item.name}/")
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    log(f"  删 dist/{item.name}")
+                    item.unlink(missing_ok=True)
+            except Exception as e:
+                log(f"  删 dist/{item.name} 失败: {e}")
+
+    # ---- 2. tools/_out + tools/_work_* ----
+    if not keep_stub_output:
+        if STUBS_OUT.exists():
+            log(f"  删 tools/_out/")
+            shutil.rmtree(STUBS_OUT, ignore_errors=True)
+    for p in ROOT.glob("tools/_work_*"):
+        log(f"  删 {p.relative_to(ROOT)}/")
+        shutil.rmtree(p, ignore_errors=True)
+
+    # ---- 3. 主程序源码里的 build/ dist/ ----
+    if source_dir.exists():
+        for p in (source_dir / "build", source_dir / "dist"):
+            if p.exists():
+                log(f"  删 {p}/")
+                shutil.rmtree(p, ignore_errors=True)
+
+    # ---- 4. __pycache__ ----
+    clean_pycache(ROOT)
+    if source_dir.exists():
+        clean_pycache(source_dir)
+
+
 # --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
 def main():
     parser = argparse.ArgumentParser(
-        description="构建 MaaAuto 安装器",
+        description="构建 MaaAuto 安装器（单 exe）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR,
                         help=f"MaaAutoProject 源码目录（默认: {DEFAULT_SOURCE_DIR}）")
     parser.add_argument("--debug", action="store_true",
-                        help="保留控制台 + stubs 也 debug")
+                        help="保留控制台（同时不清理中间产物）")
     parser.add_argument("--no-stub-rebuild", action="store_true",
-                        help="复用已有 stubs")
+                        help="复用已有 stubs（若存在）")
     parser.add_argument("--keep-build", action="store_true",
-                        help="不清理 dist/ build/ _embedded/")
+                        help="不清理中间产物")
     args = parser.parse_args()
 
     source_dir = args.source_dir.resolve()
+    keep_build = args.keep_build or args.debug   # Q5: --debug 自动等于 --keep-build
 
     print("=" * 64)
-    print("MaaAutoInstaller 构建")
+    print("MaaAutoInstaller 构建（单 exe）")
     print("=" * 64)
     print(f"项目根目录   : {ROOT}")
     print(f"源码目录     : {source_dir}")
     print(f"Python       : {sys.version.split()[0]} ({sys.executable})")
+    print(f"清理中间产物 : {'否' if keep_build else '是'}")
     print("=" * 64)
 
     if not source_dir.exists():
         err(f"源码目录不存在: {source_dir}")
+        err(f"请用 --source-dir 指定正确的路径")
+        sys.exit(1)
+
+    if not (source_dir / "app_info.py").exists():
+        err(f"源码目录里没有 app_info.py: {source_dir}")
         sys.exit(1)
 
     try:
@@ -441,48 +447,61 @@ def main():
     log(f"安装器版本  : {installer_version}")
     log(f"应用版本    : {app_version}")
 
-    if not args.keep_build:
-        clean_artifacts()
-    clean_pycache(ROOT)
+    # 每次构建前先清一遍旧的临时中间产物
+    # （但不动 dist，因为 dist 里可能有上一次的最终 exe，构建最后会一起处理）
+    if not keep_build:
+        for p in (BUILD_DIR, EMBEDDED_DIR):
+            if p.exists():
+                shutil.rmtree(p, ignore_errors=True)
+        for f in (SPEC_FILE, ROOT / "_installer_version_info.txt"):
+            if f.exists():
+                f.unlink(missing_ok=True)
 
-    # 1) source.zip
-    source_zip = EMBEDDED_DIR / "source.zip"
-    build_source_zip(source_dir, source_zip)
-
-    # 2) stubs
+    # 1) stubs
     uninstall_exe, upgrade_exe = build_stubs(
         force=not args.no_stub_rebuild,
         debug=args.debug,
     )
 
+    # 2) source.zip
+    source_zip = EMBEDDED_DIR / "source.zip"
+    build_source_zip(source_dir, source_zip)
+
     # 3) 安装器 exe
-    installer_exe = build_installer_exe(
+    built_exe = build_installer_exe(
         uninstall_exe=uninstall_exe,
         upgrade_exe=upgrade_exe,
+        source_zip=source_zip,
         version=installer_version,
         debug=args.debug,
     )
 
-    # 4) 交付 zip
-    final_zip = compose_final_zip(
-        installer_exe=installer_exe,
-        source_zip=source_zip,
-        version=installer_version,
-        app_version=app_version,
-    )
+    # 4) 改名为最终产物
+    final_name = f"MaaAuto_Online_v{app_version}-Windows-x64.exe"
+    final_exe = DIST_DIR / final_name
+    if final_exe.exists():
+        final_exe.unlink()
+    shutil.move(str(built_exe), str(final_exe))
+    size_mb = final_exe.stat().st_size / (1024 * 1024)
+    log(f"最终产物: dist/{final_name} ({size_mb:.1f} MB)")
 
-    if not args.keep_build:
-        clean_pycache(ROOT)
+    # 5) 清理
+    if not keep_build:
+        clean_all(source_dir, keep_final_exe=final_name)
+    else:
+        log("（跳过清理：--keep-build 或 --debug）")
 
     print("=" * 64)
     print("构建成功 ✅")
     print("=" * 64)
-    print(f"最终产物 : {final_zip}")
-    print(f"           （解压后得到 MaaAuto_Setup.exe + MaaAuto_Source.zip + README.txt）")
+    print(f"最终产物 : {final_exe}")
+    print()
+    print("这是一个独立 exe：用户双击即启动安装向导，")
+    print("无需任何同级文件（source.zip + stubs 已内嵌）。")
     print()
     print("自测方法 :")
-    print("  1. 解压 final_zip 到临时目录（三个文件放一起）")
-    print("  2. 双击 MaaAuto_Setup.exe，走完整安装流程")
+    print("  1. 拷贝该 exe 到任意临时目录（单独一个文件）")
+    print("  2. 双击，走完整安装流程")
     print("  3. 检查安装目录里有 MaaAuto.exe / uninstall.exe / upgrade.exe")
     print("  4. 从桌面快捷方式启动 MaaAuto")
     print("  5. 双击 uninstall.exe，验证卸载")

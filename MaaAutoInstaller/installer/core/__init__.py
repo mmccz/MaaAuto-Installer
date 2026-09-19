@@ -1,7 +1,7 @@
 """core：安装器的全部业务逻辑。
 
 所有模块不依赖 GUI，可在 QThread 中调用。
-将来更新器可直接复用。
+升级器（upgrade_stub.py）也直接复用这里的模块。
 """
 
 # ---- manifest ----
@@ -36,7 +36,7 @@ from installer.core.pip_installer import (ensure_pip,
 from installer.core.pyinstaller_builder import (build_main_program,
                                                 copy_dist_to_install)
 
-# ---- 卸载 / 升级 ----
+# ---- 卸载 / 升级（部署）----
 from installer.core.uninstall import (deploy_uninstaller,
                                       is_uninstall_mode,
                                       find_install_dir_from_exe)
@@ -53,6 +53,35 @@ from installer.core.shortcut import (create_desktop_shortcut,
                                      create_startmenu_shortcut,
                                      remove_desktop_shortcut,
                                      remove_startmenu_shortcut)
+
+# ---- 升级引擎（必须在最后：它依赖上面所有模块）----
+from installer.core.upgrade_engine import (
+    # 数据类
+    UpdateInfo, UpgradeResult,
+    # 异常
+    UpgradeCancelled,
+    # 版本
+    parse_version, compare_versions, check_installer_version,
+    # 检查更新
+    fetch_latest_release, check_update,
+    # 下载
+    sha256_of_file, download_source,
+    # 主程序控制
+    is_main_running, request_main_exit, clear_upgrading_flag,
+    # 失败标记
+    write_failure_flag, clear_failure_flag,
+    # 备份 / 回滚
+    backup_install, restore_backup, cleanup_backup,
+    # 工作目录
+    make_work_dir,
+    # 版本号读取
+    read_app_version,
+    # 主流程
+    perform_upgrade,
+    # 常量
+    MAIN_EXE_NAME, UPGRADE_FLAG_NAME, FAILURE_FLAG_NAME,
+    DEFAULT_MIN_INSTALLER_VERSION, DEFAULT_EXIT_TIMEOUT,
+)
 
 
 __all__ = [
@@ -73,7 +102,7 @@ __all__ = [
     "ensure_pip", "install_requirements", "install_pyinstaller", "has_pip",
     # pyinstaller
     "build_main_program", "copy_dist_to_install",
-    # uninstall / upgrade
+    # uninstall / upgrade（部署）
     "deploy_uninstaller", "is_uninstall_mode", "find_install_dir_from_exe",
     "deploy_upgrader",
     # cleanup
@@ -81,4 +110,18 @@ __all__ = [
     # shortcut
     "create_desktop_shortcut", "create_startmenu_shortcut",
     "remove_desktop_shortcut", "remove_startmenu_shortcut",
+    # upgrade engine
+    "UpdateInfo", "UpgradeResult",
+    "UpgradeCancelled",
+    "parse_version", "compare_versions", "check_installer_version",
+    "fetch_latest_release", "check_update",
+    "sha256_of_file", "download_source",
+    "is_main_running", "request_main_exit", "clear_upgrading_flag",
+    "write_failure_flag", "clear_failure_flag",
+    "backup_install", "restore_backup", "cleanup_backup",
+    "make_work_dir",
+    "read_app_version",
+    "perform_upgrade",
+    "MAIN_EXE_NAME", "UPGRADE_FLAG_NAME", "FAILURE_FLAG_NAME",
+    "DEFAULT_MIN_INSTALLER_VERSION", "DEFAULT_EXIT_TIMEOUT",
 ]

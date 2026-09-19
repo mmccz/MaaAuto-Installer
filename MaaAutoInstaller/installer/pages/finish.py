@@ -51,6 +51,7 @@ class FinishPage(BasePage):
         btns.setSpacing(10)
 
         self.btn_open = QPushButton(self.i18n.t("page.finish.open_dir"))
+        self.btn_open.setObjectName("WizardBtnSecondary")
         self.btn_open.setCursor(Qt.PointingHandCursor)
         self.btn_open.clicked.connect(self._open_dir)
         btns.addWidget(self.btn_open)
@@ -58,6 +59,7 @@ class FinishPage(BasePage):
         btns.addStretch()
 
         self.btn_launch = QPushButton(self.i18n.t("page.finish.launch"))
+        self.btn_launch.setObjectName("WizardBtnPrimary")
         self.btn_launch.setCursor(Qt.PointingHandCursor)
         self.btn_launch.clicked.connect(self._launch)
         btns.addWidget(self.btn_launch)

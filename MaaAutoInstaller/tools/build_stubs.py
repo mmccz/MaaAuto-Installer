@@ -7,7 +7,7 @@
     python tools/build_stubs.py --only uninstall
     python tools/build_stubs.py --only upgrade
 """
-
+import os
 import sys
 import shutil
 import argparse
@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = ROOT / "tools"
 OUT_DIR = TOOLS_DIR / "_out"
 ICON = ROOT / "resources" / "icon.ico"
+VERSION_FILE = ROOT / "VERSION"
 
 
 # 两个 stub 的打包配置
@@ -33,16 +34,40 @@ STUBS = {
             "PIL", "tkinter", "IPython", "jupyter", "notebook",
             "psutil", "pywin32", "win32com",
         ],
+        "add_version": False,
+        "extra_paths": [],
+        "add_icon": True,
     },
     "upgrade": {
         "script": TOOLS_DIR / "upgrade_stub.py",
         "name": "upgrade",
+        # upgrade 需要 PySide6（交互进度窗），但不依赖其他重型库
         "excludes": [
-            "PySide6", "PySide2", "PyQt5", "PyQt6",
             "matplotlib", "numpy", "scipy", "pandas",
-            "PIL", "tkinter", "IPython", "jupyter", "notebook",
+            "PIL", "IPython", "jupyter", "notebook",
             "psutil", "pywin32", "win32com",
+            # PySide6 里用不到的大模块
+            "PySide6.QtWebEngineCore",
+            "PySide6.QtWebEngineWidgets",
+            "PySide6.Qt3DCore",
+            "PySide6.QtMultimedia",
+            "PySide6.QtQml",
+            "PySide6.QtQuick",
+            "PySide6.QtNetwork",
+            "PySide6.QtSql",
+            "PySide6.QtTest",
+            "PySide6.QtOpenGL",
+            "PySide6.QtOpenGLWidgets",
+            "PySide6.QtSvg",
+            "PySide6.QtSvgWidgets",
+            "PySide6.QtPrintSupport",
+            "PySide6.QtDBus",
         ],
+        # upgrade stub 需要 import installer.core.*
+        "extra_paths": [str(ROOT)],
+        # 需要内嵌 VERSION 文件
+        "add_version": True,
+        "add_icon": True,
     },
 }
 
@@ -74,8 +99,14 @@ def build_one(stub_key: str, debug: bool) -> Path:
     ]
     if ICON.exists():
         cmd += ["--icon", str(ICON)]
-    for m in cfg["excludes"]:
+    for m in cfg.get("excludes", []):
         cmd += ["--exclude-module", m]
+    for p in cfg.get("extra_paths", []):
+        cmd += ["--paths", p]
+    if cfg.get("add_version") and VERSION_FILE.exists():
+        cmd += ["--add-data", f"{VERSION_FILE}{os.pathsep}."]
+    if cfg.get("add_icon") and ICON.exists():          # ← 新增
+        cmd += ["--add-data", f"{ICON}{os.pathsep}resources"]
 
     cmd.append(str(script))
 
@@ -95,9 +126,7 @@ def build_one(stub_key: str, debug: bool) -> Path:
     size_mb = exe.stat().st_size / (1024 * 1024)
     print(f"[build_stubs] {name}.exe 完成 ({size_mb:.1f} MB)")
 
-    # 清理临时
     shutil.rmtree(work_dir, ignore_errors=True)
-
     return exe
 
 
