@@ -1,6 +1,6 @@
-# MaaAuto 完整项目文档
+# MaaAuto 安装器
 
-> 基于 PySide6 的 Windows 桌面自动化调度工具，用于管理 **MAA**（明日方舟）与 **MaaEnd**（终末地）。
+> 基于 PySide6 的 Windows 桌面自动安装器。
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![PySide6](https://img.shields.io/badge/PySide6-6.6+-green)
