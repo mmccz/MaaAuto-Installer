@@ -3,9 +3,9 @@ MaaAutoInstaller 一键构建脚本（单 exe 版）。
 
 流程：
   1. 打包主程序源码 → _embedded/source.zip（临时）
-  2. 打包 stubs → tools/_out/uninstall.exe + upgrade.exe
+  2. 打包 stub 源码 → _embedded/stubs_source.zip（供用户端本地打包）
   3. PyInstaller 打包安装器 → dist/MaaAuto_Online_vX.X.X-Windows-x64.exe
-     （onefile，内嵌 source.zip + uninstall.exe + upgrade.exe）
+     （onefile，内嵌 source.zip + stubs_source.zip）
   4. 默认清理所有中间产物，只留最终 exe
 
 用法：
@@ -13,7 +13,6 @@ MaaAutoInstaller 一键构建脚本（单 exe 版）。
     python build_installer.py --source-dir ../MaaAuto-Tool-works/MaaAutoProject
     python build_installer.py --debug              # 保留控制台 + 不清理
     python build_installer.py --keep-build         # 不清理中间产物
-    python build_installer.py --no-stub-rebuild    # 复用已有 stubs（若存在）
 
 产物：
     dist/MaaAuto_Online_v{app_version}-Windows-x64.exe
@@ -36,7 +35,6 @@ ROOT = Path(__file__).resolve().parent
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
 EMBEDDED_DIR = ROOT / "_embedded"
-STUBS_OUT = ROOT / "tools" / "_out"
 SPEC_FILE = ROOT / "MaaAuto_Setup.spec"
 VERSION_FILE = ROOT / "VERSION"
 
@@ -118,7 +116,7 @@ def should_skip(name: str, path: Path):
 
 
 # --------------------------------------------------------------------------- #
-# 1) source.zip
+# 1) source.zip（主程序源码）
 # --------------------------------------------------------------------------- #
 def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
     """
@@ -171,9 +169,9 @@ def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 2) stubs（uninstall.exe / upgrade.exe）
+# 2) stubs_source.zip（stub 源码，供用户端本地打包）
 # --------------------------------------------------------------------------- #
-# stub 源码清单（相对安装器根）
+# stub 源码清单（相对安装器根 → zip 内路径）
 _STUB_SOURCE_FILES = [
     ("tools/uninstall_stub.py",              "uninstall_stub.py"),
     ("tools/upgrade_stub.py",                "upgrade_stub.py"),
@@ -181,7 +179,6 @@ _STUB_SOURCE_FILES = [
     ("resources/icon.ico",                   "resources/icon.ico"),
     ("resources/icon_upgrade.ico",           "resources/icon_upgrade.ico"),
     ("resources/icon_uninstall.ico",         "resources/icon_uninstall.ico"),
-    ("resources/icon.ico",                   "resources/icon.ico"),
     ("installer/__init__.py",                "installer/__init__.py"),
     ("installer/core/upgrade_engine.py",     "installer/core/upgrade_engine.py"),
     ("installer/core/mirror.py",             "installer/core/mirror.py"),
@@ -216,7 +213,7 @@ def build_stubs_source_zip(output_zip: Path) -> Path:
             zf.write(src, arcname)
             count += 1
 
-        # ★ 最小化 installer/core/__init__.py
+        # 最小化 installer/core/__init__.py（避免 stub 打包时拖入 pywin32）
         zf.writestr(
             "installer/core/__init__.py",
             '"""stub 场景下的最小 core 包（避免拖入 pywin32）。"""\n',
@@ -229,10 +226,8 @@ def build_stubs_source_zip(output_zip: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 3) 安装器 exe（onefile，内嵌 3 个）
+# 3) 安装器 exe（onefile，内嵌 2 个资源）
 # --------------------------------------------------------------------------- #
-def build_installer_exe(source_zip: Path,
-                        stubs_source_zip: Path,
 def build_installer_exe(source_zip: Path,
                         stubs_source_zip: Path,
                         version: str,
@@ -240,17 +235,16 @@ def build_installer_exe(source_zip: Path,
     """
     PyInstaller 打包 installer/ → dist/MaaAuto_Setup.exe（onefile）。
     内嵌 source.zip + stubs_source.zip。
-    内嵌 source.zip + stubs_source.zip。
     """
     log("打包安装器 (MaaAuto_Setup.exe) [onefile]...")
 
+    # 准备临时 _embedded 目录（把 2 个文件放一起，方便 --add-data）
     build_embedded = BUILD_DIR / "_embedded"
     if build_embedded.exists():
         shutil.rmtree(build_embedded, ignore_errors=True)
     build_embedded.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(source_zip, build_embedded / "source.zip")
-    shutil.copy2(stubs_source_zip, build_embedded / "stubs_source.zip")
     shutil.copy2(stubs_source_zip, build_embedded / "stubs_source.zip")
 
     icon = ROOT / "resources" / "icon.ico"
@@ -260,14 +254,11 @@ def build_installer_exe(source_zip: Path,
         "--noconfirm", "--clean",
         "--name", "MaaAuto_Setup",
         "--onefile",
-        "--uac-admin",                      # ★ 新增：请求管理员权限，才能写 HKLM
-        "--uac-admin",                      # ★ 新增：请求管理员权限，才能写 HKLM
+        "--uac-admin",
         "--windowed" if not debug else "--console",
         str(ROOT / "installer" / "__main__.py"),
         # 内嵌 2 个资源
-        # 内嵌 2 个资源
         "--add-data", f"{build_embedded / 'source.zip'}{os.pathsep}_embedded",
-        "--add-data", f"{build_embedded / 'stubs_source.zip'}{os.pathsep}_embedded",
         "--add-data", f"{build_embedded / 'stubs_source.zip'}{os.pathsep}_embedded",
         # i18n
         "--add-data", f"{ROOT / 'installer' / 'i18n'}{os.pathsep}installer/i18n",
@@ -353,8 +344,7 @@ VSVersionInfo(
 def clean_pycache(root: Path):
     """清理 root 下所有 __pycache__。"""
     removed = 0
-    skip = {".git", "venv", ".venv", "env", "node_modules",
-            "_embedded", "_work_uninstall", "_work_upgrade"}
+    skip = {".git", "venv", ".venv", "env", "node_modules", "_embedded"}
     for dirpath, dirnames, _files in os.walk(root, topdown=True):
         dirnames[:] = [d for d in dirnames if d.lower() not in skip]
         if "__pycache__" in dirnames:
@@ -366,9 +356,7 @@ def clean_pycache(root: Path):
         log(f"清理 {removed} 个 __pycache__")
 
 
-def clean_all(source_dir: Path,
-              keep_stub_output: bool = False,
-              keep_final_exe: str = ""):
+def clean_all(source_dir: Path, keep_final_exe: str = ""):
     """
     清理所有中间产物。默认只保留 dist/<keep_final_exe>。
     """
@@ -400,18 +388,14 @@ def clean_all(source_dir: Path,
             except Exception as e:
                 log(f"  删 dist/{item.name} 失败: {e}")
 
-    # ---- 2. tools/_out + tools/_work_* ----
-    
-    
-
-    # ---- 3. 主程序源码里的 build/ dist/ ----
+    # ---- 2. 主程序源码里的 build/ dist/ ----
     if source_dir.exists():
         for p in (source_dir / "build", source_dir / "dist"):
             if p.exists():
                 log(f"  删 {p}/")
                 shutil.rmtree(p, ignore_errors=True)
 
-    # ---- 4. __pycache__ ----
+    # ---- 3. __pycache__ ----
     clean_pycache(ROOT)
     if source_dir.exists():
         clean_pycache(source_dir)
@@ -429,14 +413,12 @@ def main():
                         help=f"MaaAutoProject 源码目录（默认: {DEFAULT_SOURCE_DIR}）")
     parser.add_argument("--debug", action="store_true",
                         help="保留控制台（同时不清理中间产物）")
-    parser.add_argument("--no-stub-rebuild", action="store_true",
-                        help="复用已有 stubs（若存在）")
     parser.add_argument("--keep-build", action="store_true",
                         help="不清理中间产物")
     args = parser.parse_args()
 
     source_dir = args.source_dir.resolve()
-    keep_build = args.keep_build or args.debug   # Q5: --debug 自动等于 --keep-build
+    keep_build = args.keep_build or args.debug
 
     print("=" * 64)
     print("MaaAutoInstaller 构建（单 exe）")
@@ -468,7 +450,6 @@ def main():
     log(f"应用版本    : {app_version}")
 
     # 每次构建前先清一遍旧的临时中间产物
-    # （但不动 dist，因为 dist 里可能有上一次的最终 exe，构建最后会一起处理）
     if not keep_build:
         for p in (BUILD_DIR, EMBEDDED_DIR):
             if p.exists():
@@ -478,13 +459,8 @@ def main():
                 f.unlink(missing_ok=True)
 
     # 1) source.zip（主程序源码）
-    # 1) source.zip（主程序源码）
     source_zip = EMBEDDED_DIR / "source.zip"
     build_source_zip(source_dir, source_zip)
-
-    # 2) stubs_source.zip（stub 源码，供用户端本地打包）
-    stubs_source_zip = EMBEDDED_DIR / "stubs_source.zip"
-    build_stubs_source_zip(stubs_source_zip)
 
     # 2) stubs_source.zip（stub 源码，供用户端本地打包）
     stubs_source_zip = EMBEDDED_DIR / "stubs_source.zip"
@@ -493,7 +469,6 @@ def main():
     # 3) 安装器 exe
     built_exe = build_installer_exe(
         source_zip=source_zip,
-        stubs_source_zip=stubs_source_zip,
         stubs_source_zip=stubs_source_zip,
         version=installer_version,
         debug=args.debug,
@@ -520,7 +495,7 @@ def main():
     print(f"最终产物 : {final_exe}")
     print()
     print("这是一个独立 exe：用户双击即启动安装向导，")
-    print("无需任何同级文件（source.zip + stubs 已内嵌）。")
+    print("无需任何同级文件（source.zip + stubs_source.zip 已内嵌）。")
     print()
     print("自测方法 :")
     print("  1. 拷贝该 exe 到任意临时目录（单独一个文件）")
