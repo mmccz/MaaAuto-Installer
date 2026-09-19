@@ -95,6 +95,11 @@ def should_skip(name: str, path: Path):
 # 1) source.zip
 # --------------------------------------------------------------------------- #
 def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
+    """
+    打包 source_dir 为 zip，排除 __pycache__ / .git / build / dist / config / logs 等。
+    - zip 内部顶层就是源码根（不含 source_dir 名字）
+    - 若 source_dir 里没有 requirements.txt，自动从上一级补
+    """
     if not source_dir.exists():
         raise FileNotFoundError(f"源码目录不存在: {source_dir}")
 
@@ -103,11 +108,19 @@ def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
     if output_zip.exists():
         output_zip.unlink()
 
-        count = 0
+    count = 0                                       # ← 这个必须要有
+
     with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        # 1) 遍历源码目录
         for root, dirs, files in os.walk(source_dir):
             root_path = Path(root)
-            dirs[:] = [d for d in dirs if not should_skip(d, root_path / d)]
+
+            # 就地裁剪 dirs（避免深递归）
+            dirs[:] = [
+                d for d in dirs
+                if not should_skip(d, root_path / d)
+            ]
+
             for fname in files:
                 fpath = root_path / fname
                 if should_skip(fname, fpath):
@@ -116,7 +129,7 @@ def build_source_zip(source_dir: Path, output_zip: Path) -> Path:
                 zf.write(fpath, arcname.as_posix())
                 count += 1
 
-        # ← 新增：若 source_dir 里没有 requirements.txt，尝试从上级补齐
+        # 2) 若 source_dir 里没 requirements.txt，尝试从上一级补齐
         req_in_source = source_dir / "requirements.txt"
         if not req_in_source.exists():
             for candidate in (
@@ -207,6 +220,8 @@ def build_installer_exe(uninstall_exe: Path,
         "--add-data", f"{build_embedded / 'upgrade.exe'}{os.pathsep}_embedded",
         # i18n
         "--add-data", f"{ROOT / 'installer' / 'i18n'}{os.pathsep}installer/i18n",
+        "--add-data", f"{ROOT / 'resources'}{os.pathsep}resources",   # ← 新增  
+        
         # hidden imports
         "--hidden-import", "PySide6.QtNetwork",
         "--hidden-import", "win32com",

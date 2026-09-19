@@ -1,13 +1,13 @@
 """
-MaaAuto 卸载器 stub。
-PyInstaller 打包后 → tools/_out/uninstall.exe
+MaaAuto 卸载器 stub（VBS 后端版）。
+PyInstaller 打包 → tools/_out/uninstall.exe
 安装时被释放到 <install>/uninstall.exe。
 
-设计要点：
-  - 用 ctypes 调 Win32 MessageBox，体积小
-  - 生成 GBK 编码的后台 bat 完成删除（避免 utf-8-sig BOM 让 cmd 崩溃）
-  - bat 内先 taskkill 主程序 → cd 到 %TEMP% → 循环重试 rmdir
-  - 全程写日志到 %TEMP%\\MaaAuto_uninstall.log 方便排查
+为什么用 VBS 而不是 bat：
+  - bat 的 `tasklist | find` 在某些系统上会卡住（等待 stdin）
+  - bat 编码坑（GBK/UTF-8-SIG）
+  - wscript.exe 从 XP 起就自带，绝对可靠
+  - VBS 的 FileSystemObject 删除目录比 rmdir 更稳
 """
 
 import os
@@ -21,7 +21,6 @@ from pathlib import Path
 import ctypes
 
 
-# --- Win32 常量 ---
 MB_OK = 0x0
 MB_YESNO = 0x4
 MB_ICONQUESTION = 0x20
@@ -38,9 +37,7 @@ def msg(title, text, flags=MB_OK | MB_ICONINFORMATION) -> int:
         return 0
 
 
-# --------------------------------------------------------------------------- #
 def get_install_dir() -> Path:
-    """PyInstaller onefile：sys.executable 是 exe 本身。"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -76,111 +73,111 @@ def remove_shortcuts():
 
 
 # --------------------------------------------------------------------------- #
-def build_bat_content(install_dir: Path, pid: int, keep_user_data: bool) -> str:
-    """
-    生成 bat 内容。
-    注意：用英文写 + chcp 936，避免编码问题。
-    """
-    target = str(install_dir.resolve())
-    # 反斜杠转义：bat 里用 \ 就行
-    log_file = r"%TEMP%\MaaAuto_uninstall.log"
+# VBS 生成
+# --------------------------------------------------------------------------- #
+def build_vbs(install_dir: Path, keep_user_data: bool) -> str:
+    """生成 VBS 脚本。纯英文，避免编码问题。"""
+    target = str(install_dir)
 
     if keep_user_data:
-        # 保留 config/ 和 logs/：先把它们挪到 temp，删完目录再挪回来
-        # （简化：只提示，不真的保留 —— 因为挪回来还要重建目录太麻烦）
-        # 改方案：不删 config 和 logs 子目录，只删其他
-        delete_block = f'''
-echo [%DATE% %TIME%] Deleting files except config/ and logs/ >> "{log_file}"
-for /D %%D in ("{target}\\*") do (
-    if /I not "%%~nxD"=="config" if /I not "%%~nxD"=="logs" (
-        echo   rmdir /S /Q "%%D" >> "{log_file}"
-        rd /S /Q "%%D" 2>>"{log_file}"
-    )
-)
-for %%F in ("{target}\\*") do (
-    del /F /Q "%%F" 2>>"{log_file}"
-)
+        cleanup = '''
+' 保留 config/ 和 logs/，删其他
+Dim keepList
+keepList = Array("config", "logs")
+Dim sf
+For Each sf In fso.GetFolder(target).SubFolders
+    Dim isKeep
+    isKeep = False
+    Dim k
+    For Each k In keepList
+        If LCase(sf.Name) = k Then isKeep = True
+    Next
+    If Not isKeep Then
+        On Error Resume Next
+        sf.Delete True
+        On Error Goto 0
+    End If
+Next
+Dim fl
+For Each fl In fso.GetFolder(target).Files
+    On Error Resume Next
+    fl.Delete True
+    On Error Goto 0
+Next
 '''
     else:
-        # 全部删除
-        delete_block = f'''
-echo [%DATE% %TIME%] Removing entire directory >> "{log_file}"
-:retry_del
-rd /S /Q "{target}" 2>>"{log_file}"
-if exist "{target}" (
-    set /a _CNT+=1
-    if !_CNT! LSS 15 (
-        timeout /t 1 /nobreak > NUL
-        goto retry_del
-    )
-)
+        cleanup = '''
+' 全删
+On Error Resume Next
+fso.DeleteFolder target, True
+On Error Goto 0
 '''
 
-    content = f'''@echo off
-chcp 936 > NUL
-setlocal EnableDelayedExpansion
-set "_CNT=0"
+    vbs = f'''Option Explicit
+Dim fso, shell, target
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("WScript.Shell")
 
-echo. > "{log_file}"
-echo [%DATE% %TIME%] MaaAuto uninstaller start >> "{log_file}"
-echo   TARGET = {target} >> "{log_file}"
-echo   PID    = {pid} >> "{log_file}"
-echo   KEEP   = {str(keep_user_data).lower()} >> "{log_file}"
+target = "{target}"
 
-rem ---- 1) 等卸载器进程退出 ----
-:waitloop
-tasklist /FI "PID eq {pid}" /NH 2>NUL | find "{pid}" >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak > NUL
-    goto waitloop
-)
-echo [%DATE% %TIME%] Uninstaller process exited >> "{log_file}"
+' 1) 等卸载器进程退出
+WScript.Sleep 2500
 
-rem ---- 2) 杀掉主程序（避免文件占用） ----
-echo [%DATE% %TIME%] Killing MaaAuto.exe >> "{log_file}"
-taskkill /F /IM MaaAuto.exe >NUL 2>&1
-taskkill /F /IM MaaAuto.exe >NUL 2>&1
-timeout /t 1 /nobreak > NUL
+' 2) 杀主程序（若在运行）
+On Error Resume Next
+shell.Run "taskkill /F /IM MaaAuto.exe", 0, True
+On Error Goto 0
+WScript.Sleep 800
 
-rem ---- 3) 切到 TEMP（避免删自己工作目录） ----
-cd /D "%TEMP%"
-echo [%DATE% %TIME%] cwd = %CD% >> "{log_file}"
-{delete_block}
-echo [%DATE% %TIME%] Cleanup finished >> "{log_file}"
+' 3) 清理目录
+If fso.FolderExists(target) Then
+{cleanup}
+End If
 
-rem ---- 4) 自删除 ----
-del "%~f0" >NUL 2>&1
+' 4) 自删除
+On Error Resume Next
+fso.DeleteFile WScript.ScriptFullName, True
+On Error Goto 0
 '''
-    return content
+    return vbs
 
 
-def launch_delete_bat(install_dir: Path, keep_user_data: bool) -> bool:
-    current_pid = os.getpid()
-    content = build_bat_content(install_dir, current_pid, keep_user_data)
+def launch_vbs(install_dir: Path, keep_user_data: bool) -> bool:
+    content = build_vbs(install_dir, keep_user_data)
+    vbs_path = Path(tempfile.gettempdir()) / f"MaaAuto_uninstall_{int(time.time())}.vbs"
 
-    bat_path = Path(tempfile.gettempdir()) / f"MaaAuto_uninstall_{int(time.time())}.bat"
-
-    # 用 GBK 写入（Windows 中文系统）——不要用 utf-8-sig！
+    # 用 GBK 写（中文 Windows 上的 ANSI 编码），wscript 按 ANSI 解码
     try:
-        bat_path.write_text(content, encoding="gbk", errors="replace")
-    except UnicodeEncodeError:
-        # 极端情况路径含非 GBK 字符，退化为 ASCII
-        bat_path.write_text(content, encoding="ascii", errors="replace")
+        vbs_path.write_text(content, encoding="gbk", errors="replace")
+    except Exception:
+        try:
+            vbs_path.write_text(content, encoding="utf-8-sig")
+        except Exception:
+            msg("卸载失败", f"无法写 VBS：\n{vbs_path}", MB_OK | MB_ICONERROR)
+            return False
 
-    try:
-        subprocess.Popen(
-            ["cmd", "/c", str(bat_path)],
-            creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | NEW_PROCESS_GROUP
-            close_fds=True,
-            cwd=str(Path(tempfile.gettempdir())),   # ← cwd 设为 TEMP
-        )
-        return True
-    except Exception as e:
-        msg("卸载失败",
-            f"无法启动后台清理脚本：\n\n{e}\n\n"
-            f"脚本路径：{bat_path}",
-            MB_OK | MB_ICONERROR)
-        return False
+    # 优先 wscript.exe，退化到 cscript.exe
+    FLAGS = 0x08000000 | 0x00000008   # CREATE_NO_WINDOW | DETACHED_PROCESS
+    for exe in ("wscript.exe", "cscript.exe"):
+        try:
+            subprocess.Popen(
+                [exe, "//B", "//Nologo", str(vbs_path)],
+                creationflags=FLAGS,
+                close_fds=True,
+                cwd=str(Path(tempfile.gettempdir())),
+            )
+            return True
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            msg("卸载失败", f"启动 {exe} 失败：\n\n{e}", MB_OK | MB_ICONERROR)
+            return False
+
+    msg("卸载失败",
+        "系统缺少 wscript.exe 和 cscript.exe，无法自动清理。\n\n"
+        f"请手动删除：{install_dir}",
+        MB_OK | MB_ICONERROR)
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -189,18 +186,15 @@ def main() -> int:
     manifest = read_manifest(install_dir)
     version = manifest.get("version", "")
 
-    # 1) 确认卸载
     title = "MaaAuto 卸载程序"
     text = f"将从以下位置删除 MaaAuto：\n\n{install_dir}\n"
     if version:
         text += f"\n版本：{version}\n"
     text += "\n是否继续？\n\n（桌面 / 开始菜单快捷方式也会一并删除）"
 
-    r = msg(title, text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)
-    if r != IDYES:
+    if msg(title, text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES:
         return 0
 
-    # 2) 是否保留用户数据
     r2 = msg(
         "保留用户数据",
         "是否保留用户配置 (config\\) 和日志 (logs\\)？\n\n"
@@ -210,12 +204,9 @@ def main() -> int:
     )
     keep_user_data = (r2 == IDYES)
 
-    # 3) 立即删快捷方式
     remove_shortcuts()
 
-    # 4) 后台清理
-    ok = launch_delete_bat(install_dir, keep_user_data)
-    if ok:
+    if launch_vbs(install_dir, keep_user_data):
         msg("卸载中",
             "MaaAuto 正在被删除...\n\n"
             "几秒后安装目录会被清理干净。\n"
