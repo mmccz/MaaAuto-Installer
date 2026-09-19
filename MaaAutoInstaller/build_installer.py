@@ -233,10 +233,13 @@ def build_stubs_source_zip(output_zip: Path) -> Path:
 # --------------------------------------------------------------------------- #
 def build_installer_exe(source_zip: Path,
                         stubs_source_zip: Path,
+def build_installer_exe(source_zip: Path,
+                        stubs_source_zip: Path,
                         version: str,
                         debug: bool) -> Path:
     """
     PyInstaller 打包 installer/ → dist/MaaAuto_Setup.exe（onefile）。
+    内嵌 source.zip + stubs_source.zip。
     内嵌 source.zip + stubs_source.zip。
     """
     log("打包安装器 (MaaAuto_Setup.exe) [onefile]...")
@@ -248,6 +251,7 @@ def build_installer_exe(source_zip: Path,
 
     shutil.copy2(source_zip, build_embedded / "source.zip")
     shutil.copy2(stubs_source_zip, build_embedded / "stubs_source.zip")
+    shutil.copy2(stubs_source_zip, build_embedded / "stubs_source.zip")
 
     icon = ROOT / "resources" / "icon.ico"
 
@@ -257,10 +261,13 @@ def build_installer_exe(source_zip: Path,
         "--name", "MaaAuto_Setup",
         "--onefile",
         "--uac-admin",                      # ★ 新增：请求管理员权限，才能写 HKLM
+        "--uac-admin",                      # ★ 新增：请求管理员权限，才能写 HKLM
         "--windowed" if not debug else "--console",
         str(ROOT / "installer" / "__main__.py"),
         # 内嵌 2 个资源
+        # 内嵌 2 个资源
         "--add-data", f"{build_embedded / 'source.zip'}{os.pathsep}_embedded",
+        "--add-data", f"{build_embedded / 'stubs_source.zip'}{os.pathsep}_embedded",
         "--add-data", f"{build_embedded / 'stubs_source.zip'}{os.pathsep}_embedded",
         # i18n
         "--add-data", f"{ROOT / 'installer' / 'i18n'}{os.pathsep}installer/i18n",
@@ -395,6 +402,7 @@ def clean_all(source_dir: Path,
 
     # ---- 2. tools/_out + tools/_work_* ----
     
+    
 
     # ---- 3. 主程序源码里的 build/ dist/ ----
     if source_dir.exists():
@@ -470,8 +478,13 @@ def main():
                 f.unlink(missing_ok=True)
 
     # 1) source.zip（主程序源码）
+    # 1) source.zip（主程序源码）
     source_zip = EMBEDDED_DIR / "source.zip"
     build_source_zip(source_dir, source_zip)
+
+    # 2) stubs_source.zip（stub 源码，供用户端本地打包）
+    stubs_source_zip = EMBEDDED_DIR / "stubs_source.zip"
+    build_stubs_source_zip(stubs_source_zip)
 
     # 2) stubs_source.zip（stub 源码，供用户端本地打包）
     stubs_source_zip = EMBEDDED_DIR / "stubs_source.zip"
@@ -480,6 +493,7 @@ def main():
     # 3) 安装器 exe
     built_exe = build_installer_exe(
         source_zip=source_zip,
+        stubs_source_zip=stubs_source_zip,
         stubs_source_zip=stubs_source_zip,
         version=installer_version,
         debug=args.debug,
