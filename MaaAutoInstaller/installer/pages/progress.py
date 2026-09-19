@@ -7,7 +7,6 @@ import ctypes
 import tempfile
 import traceback
 from pathlib import Path
-
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
                                QTextEdit, QMessageBox)
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
@@ -23,7 +22,8 @@ from installer.core import (resolve_pypi_mirror, resolve_python_mirror,
                             deploy_uninstaller, deploy_upgrader,
                             create_desktop_shortcut, create_startmenu_shortcut,
                             Manifest, write_manifest,
-                            remove_work_dir, clean_pip_cache, clean_system_temp)
+                            remove_work_dir, clean_pip_cache, clean_system_temp,
+                            build_all_stubs, unpack_stubs_source,register_all)
 
 
 # --------------------------------------------------------------------------- #
@@ -73,15 +73,27 @@ def _find_source_zip() -> Path:
     )
 
 
-def _find_embedded_stub(name: str) -> Path:
-    p = _meipass_dir() / "_embedded" / name
-    if p.exists():
-        return p
-    p = _exe_dir() / "tools" / "_out" / name
-    if p.exists():
-        return p
-    raise FileNotFoundError(f"找不到内嵌 {name}（请先运行 tools/build_stubs.py）")
+def _find_stubs_source() -> Path:
+    """
+    查找 stubs_source.zip（按优先级）：
+      ① 打包后：_MEIPASS/_embedded/stubs_source.zip
+      ② 开发时：<exe同级>/_embedded/stubs_source.zip
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = Path(meipass) / "_embedded" / "stubs_source.zip"
+        if p.exists():
+            return p
 
+    p = _exe_dir() / "_embedded" / "stubs_source.zip"
+    if p.exists():
+        return p
+
+    raise FileNotFoundError(
+        "找不到 stubs_source.zip。\n"
+        "若从源码运行，请先跑一次 build_installer.py 生成；\n"
+        "若运行打包好的 exe，说明打包时内嵌失败。"
+    )
 
 def _set_hidden(path: Path):
     """把目录设为隐藏（Windows 资源管理器默认看不到）。"""
@@ -119,14 +131,16 @@ class InstallWorker(QThread):
     STAGE_LAYOUT = [
         ("page.progress.stage.prepare",              2),
         ("page.progress.stage.download_python",      8),
-        ("page.progress.stage.unpack_source",        3),
+        ("page.progress.stage.unpack_source",        2),
         ("page.progress.stage.install_deps",        28),
         ("page.progress.stage.install_pyinstaller",  5),
-        ("page.progress.stage.build_main",          37),
-        ("page.progress.stage.deploy_stubs",         3),
-        ("page.progress.stage.create_shortcut",      3),
+        ("page.progress.stage.build_main",          28),
+        ("page.progress.stage.build_stubs",         15),
+        ("page.progress.stage.deploy_stubs",         2),
+        ("page.progress.stage.create_shortcut",      2),
         ("page.progress.stage.write_manifest",       2),
-        ("page.progress.stage.cleanup",              8),
+        ("page.progress.stage.write_registry",       2),   # ★ 新增
+        ("page.progress.stage.cleanup",              3),
         ("page.progress.stage.done",                 1),
     ]
 
@@ -344,21 +358,40 @@ class InstallWorker(QThread):
             copy_dist_to_install(dist_app_dir, install_dir, log=self._log)
             self._advance()
 
-            # ---- 8. 释放 uninstall.exe / upgrade.exe ----
+            # ---- 8. 本地打包 stub ----
+            self._check()
+            self._stage("page.progress.stage.build_stubs")
+            stubs_source_zip = _find_stubs_source()
+            self._log(f"stub 源码包: {stubs_source_zip.name}")
+
+            stubs_dir = work_dir / "stubs"
+            unpack_stubs_source(stubs_source_zip, stubs_dir, log=self._log)
+
+            self._log("本地打包卸载器（~30 秒）...")
+            self._log("本地打包升级器（含 PySide6，需 2-4 分钟）...")
+            stub_out = work_dir / "stub_out"
+            uninstall_exe, upgrade_exe = build_all_stubs(
+                python_exe=python_exe,
+                stub_source_dir=stubs_dir,
+                out_dir=stub_out,
+                log=self._log,
+            )
+            self._advance()
+
+            # ---- 9. 释放 stub 到安装目录 ----
             self._check()
             self._stage("page.progress.stage.deploy_stubs")
-            uninstall_src = _find_embedded_stub("uninstall.exe")
-            upgrade_src = _find_embedded_stub("upgrade.exe")
-            uninstall_dst = deploy_uninstaller(uninstall_src, install_dir,
+            uninstall_dst = deploy_uninstaller(uninstall_exe, install_dir,
                                                log=self._log)
-            upgrade_dst = deploy_upgrader(upgrade_src, install_dir,
+            upgrade_dst = deploy_upgrader(upgrade_exe, install_dir,
                                           log=self._log)
             self._advance()
 
-            # ---- 9. 快捷方式 ----
+            # ---- 10. 快捷方式 ----
             self._check()
             self._stage("page.progress.stage.create_shortcut")
-            main_exe = install_dir / "MaaAuto.exe"
+
+            main_exe = install_dir / "MaaAuto.exe"          # ★ 补回这行
             icon_path = install_dir / "resources" / "icon.ico"
             if not icon_path.exists():
                 icon_path = main_exe
@@ -382,7 +415,7 @@ class InstallWorker(QThread):
                     self._log(f"创建开始菜单快捷方式失败: {e}")
             self._advance()
 
-            # ---- 10. 写 manifest ----
+            # ---- 11. 写 manifest ----
             self._check()
             self._stage("page.progress.stage.write_manifest")
             manifest = Manifest(
@@ -411,7 +444,18 @@ class InstallWorker(QThread):
             self._log(f"元数据: {install_dir / '.maaauto.json'}")
             self._advance()
 
-            # ---- 11. 完成 ----
+            # ---- 12. 写注册表 ----
+            self._check()
+            self._stage("page.progress.stage.write_registry")
+            try:
+                register_all(install_dir, s.app_version,
+                             set_admin=True, log=self._log)
+                self._log("注册表写入完成")
+            except Exception as e:
+                self._log(f"注册表写入失败（非致命）: {e}")
+            self._advance()
+
+            # ---- 13. 完成 ----
             self._stage("page.progress.stage.done")
             self._log("=" * 48)
             self._log(f"安装完成！MaaAuto {s.app_version}")
@@ -528,6 +572,11 @@ class ProgressPage(BasePage):
         self.log_view.setPlaceholderText(self.i18n.t("page.progress.log_empty"))
         self.log_view.setAcceptRichText(False)
         root.addWidget(self.log_view, 1)
+        self.eta_hint = QLabel("")
+        self.eta_hint.setObjectName("PageHint")
+        self.eta_hint.setWordWrap(True)
+        self.eta_hint.setVisible(False)
+        root.addWidget(self.eta_hint)
 
     # ------------------------------------------------------------------ #
     def on_enter(self):
@@ -614,6 +663,14 @@ class ProgressPage(BasePage):
     # ------------------------------------------------------------------ #
     def _on_stage(self, key):
         self.stage_label.setText(self.i18n.t(key))
+        # ★ 提示随阶段变化；没定义则隐藏
+        hint_key = f"{key}.hint"
+        hint = self.i18n.t(hint_key)
+        if hint == hint_key:
+            self.eta_hint.setVisible(False)
+        else:
+            self.eta_hint.setText(hint)
+            self.eta_hint.setVisible(True)
 
     def _on_pip_count(self, current, total):
         if self.worker is not None and self.worker._cur_key == \
@@ -699,4 +756,4 @@ class ProgressPage(BasePage):
         self.title.setText(self.i18n.t("page.progress.title"))
         self.desc.setText(self.i18n.t("page.progress.desc"))
         self.log_view.setPlaceholderText(self.i18n.t("page.progress.log_empty"))
-        self.eta_hint.setText(self.i18n.t("page.progress.eta_hint"))
+        # eta_hint 不在这设置（随阶段动态变化）

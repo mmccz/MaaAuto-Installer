@@ -48,6 +48,15 @@ from installer.core.cleanup import (remove_work_dir,
                                     clean_system_temp,
                                     full_cleanup)
 
+# ---- 注册表 ----
+from installer.core.registry import (register_all, unregister_all,
+                                     register_uninstall, unregister_uninstall,
+                                     register_app_path, unregister_app_path,
+                                     set_run_as_admin, clear_run_as_admin)
+# ---- stub 本地打包 ----
+from installer.core.stub_builder import (build_stub, build_all_stubs,
+                                         unpack_stubs_source, STUB_NAMES)
+
 # ---- 快捷方式 ----
 from installer.core.shortcut import (create_desktop_shortcut,
                                      create_startmenu_shortcut,
@@ -124,4 +133,11 @@ __all__ = [
     "perform_upgrade",
     "MAIN_EXE_NAME", "UPGRADE_FLAG_NAME", "FAILURE_FLAG_NAME",
     "DEFAULT_MIN_INSTALLER_VERSION", "DEFAULT_EXIT_TIMEOUT",
+    # stub 本地打包
+    "build_stub", "build_all_stubs", "unpack_stubs_source", "STUB_NAMES",
+    # registry
+    "register_all", "unregister_all",
+    "register_uninstall", "unregister_uninstall",
+    "register_app_path", "unregister_app_path",
+    "set_run_as_admin", "clear_run_as_admin",
 ]

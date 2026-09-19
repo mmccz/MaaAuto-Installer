@@ -36,7 +36,13 @@ from pathlib import Path
 # sys.path
 # --------------------------------------------------------------------------- #
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
+# 兼容两种布局：
+#   ① 仓库里 tools/upgrade_stub.py      → installer 在 _HERE.parent
+#   ② stubs_source.zip 解压后根目录      → installer 在 _HERE
+if (_HERE / "installer").is_dir():
+    _ROOT = _HERE
+else:
+    _ROOT = _HERE.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

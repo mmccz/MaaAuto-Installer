@@ -27,6 +27,8 @@ STUBS = {
     "uninstall": {
         "script": TOOLS_DIR / "uninstall_stub.py",
         "name": "uninstall",
+        # ★ 卸载器专用图标
+        "icon": ROOT / "resources" / "icon_uninstall.ico",
         # 只用标准库 + ctypes，排除所有重型依赖
         "excludes": [
             "PySide6", "PySide2", "PyQt5", "PyQt6",
@@ -37,10 +39,13 @@ STUBS = {
         "add_version": False,
         "extra_paths": [],
         "add_icon": True,
+        "uac_admin": True,        # ★ 卸载需要管理员权限（删 HKLM 注册表）
     },
     "upgrade": {
         "script": TOOLS_DIR / "upgrade_stub.py",
         "name": "upgrade",
+        # ★ 升级器专用图标
+        "icon": ROOT / "resources" / "icon_upgrade.ico",
         # upgrade 需要 PySide6（交互进度窗），但不依赖其他重型库
         "excludes": [
             "matplotlib", "numpy", "scipy", "pandas",
@@ -68,6 +73,7 @@ STUBS = {
         # 需要内嵌 VERSION 文件
         "add_version": True,
         "add_icon": True,
+        "uac_admin": False,       # 升级不需要管理员权限
     },
 }
 
@@ -87,26 +93,50 @@ def build_one(stub_key: str, debug: bool) -> Path:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ★ 图标：把配置里指定的图标拷贝到工作目录并重命名为 icon.ico，
+    #   这样 stub 源码里的 get_icon_path() 能在 _MEIPASS/resources/icon.ico 找到它
+    icon_cfg = cfg.get("icon")
+    icon_staged = work_dir / "icon.ico"
+    if icon_cfg and Path(icon_cfg).exists():
+        shutil.copy2(icon_cfg, icon_staged)
+    elif ICON.exists():
+        # 找不到专用图标时回退到通用图标
+        print(f"[build_stubs] 警告：未找到 {icon_cfg}，使用默认 {ICON.name}")
+        shutil.copy2(ICON, icon_staged)
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
         "--name", name,
         "--onefile",
         "--console" if debug else "--windowed",
+    ]
+
+    # ★ 管理员权限
+    if cfg.get("uac_admin"):
+        cmd += ["--uac-admin"]
+
+    cmd += [
         "--distpath", str(OUT_DIR),
         "--workpath", str(work_dir / "build"),
         "--specpath", str(work_dir),
     ]
-    if ICON.exists():
-        cmd += ["--icon", str(ICON)]
+
+    # 外壳图标
+    if icon_staged.exists() and cfg.get("add_icon"):
+        cmd += ["--icon", str(icon_staged)]
+
     for m in cfg.get("excludes", []):
         cmd += ["--exclude-module", m]
     for p in cfg.get("extra_paths", []):
         cmd += ["--paths", p]
+
     if cfg.get("add_version") and VERSION_FILE.exists():
         cmd += ["--add-data", f"{VERSION_FILE}{os.pathsep}."]
-    if cfg.get("add_icon") and ICON.exists():          # ← 新增
-        cmd += ["--add-data", f"{ICON}{os.pathsep}resources"]
+
+    # ★ 内嵌 resources/icon.ico（供 Qt setWindowIcon 用）
+    if cfg.get("add_icon") and icon_staged.exists():
+        cmd += ["--add-data", f"{icon_staged}{os.pathsep}resources"]
 
     cmd.append(str(script))
 
