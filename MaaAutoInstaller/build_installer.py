@@ -66,14 +66,18 @@ def _find_default_source_dir() -> Path:
 DEFAULT_SOURCE_DIR = _find_default_source_dir()
 
 
-# 打包源码时排除的目录 / 文件后缀
+# 打包源码时排除的目录 / 文件 / 后缀
 SOURCE_EXCLUDE_DIRS = {
     "__pycache__",
     ".git", ".github", ".gitignore", ".gitattributes",
     ".idea", ".vscode",
     "build", "dist",
+    "release",          # 开发目录里的旧 Source.zip 不能被打进新 zip
     "config", "logs",
     "venv", ".venv", "env", ".env",
+}
+SOURCE_EXCLUDE_FILES = {
+    "_version_info.txt",   # build.py 生成物
 }
 SOURCE_EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".log", ".spec")
 
@@ -162,7 +166,7 @@ def check_app_info_contract(source_dir: Path):
 
 def should_skip(name: str, path: Path):
     n = name.lower()
-    if n in SOURCE_EXCLUDE_DIRS:
+    if n in SOURCE_EXCLUDE_DIRS or n in SOURCE_EXCLUDE_FILES:
         return True
     if path.is_file():
         for suf in SOURCE_EXCLUDE_SUFFIXES:
