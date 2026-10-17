@@ -104,6 +104,62 @@ def read_app_version(source_dir: Path):
     return m.group(1) if m else "0.0.0"
 
 
+def read_app_constant(source_dir: Path, name: str) -> str:
+    """读取 app_info.py 里 ``NAME = "value"`` 形式的字符串常量。"""
+    p = source_dir / "app_info.py"
+    if not p.exists():
+        return ""
+    text = p.read_text(encoding="utf-8")
+    m = re.search(rf'^{re.escape(name)}\s*=\s*["\']([^"\']*)["\']',
+                  text, re.M)
+    return m.group(1) if m else ""
+
+
+# 主程序冻结的版本子集：X.Y.Z [(a|b|rc)N] [.postN]
+_APP_VERSION_RE = re.compile(
+    r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?$"
+)
+
+
+def check_app_info_contract(source_dir: Path):
+    """构建期强校验 app_info.py 与安装器契约一致。
+
+    失败直接抛 RuntimeError，避免打出一个“安装时写旧 API、升级永远查不到新版”的包。
+    """
+    from installer.contract import APP_INFO_CONSTANTS, default_manifest_extra
+
+    expected = default_manifest_extra()
+    errors = []
+
+    version = read_app_version(source_dir)
+    if version == "0.0.0":
+        errors.append("APP_VERSION 缺失，或不是行首 `APP_VERSION = \"...\"` 格式")
+    elif not _APP_VERSION_RE.match(version):
+        errors.append(
+            f"APP_VERSION={version!r} 不符合冻结格式 "
+            f"X.Y.Z[(a|b|rc)N][.postN]"
+        )
+
+    for extra_key, const_name in APP_INFO_CONSTANTS.items():
+        actual = read_app_constant(source_dir, const_name)
+        want = expected[extra_key]
+        if not actual:
+            errors.append(f"{const_name} 缺失，或不是行首常量格式")
+        elif actual != want:
+            errors.append(
+                f"{const_name} 与安装器契约不一致：源码={actual!r}，"
+                f"安装器={want!r}"
+            )
+
+    if errors:
+        raise RuntimeError(
+            "app_info.py 与安装器契约不一致：\n  - " + "\n  - ".join(errors)
+        )
+
+    log(f"契约常量校验通过: APP_VERSION={version}, "
+        f"{', '.join(APP_INFO_CONSTANTS.values())}")
+
+
 def should_skip(name: str, path: Path):
     n = name.lower()
     if n in SOURCE_EXCLUDE_DIRS:
@@ -436,6 +492,13 @@ def main():
 
     if not (source_dir / "app_info.py").exists():
         err(f"源码目录里没有 app_info.py: {source_dir}")
+        sys.exit(1)
+
+    try:
+        check_app_info_contract(source_dir)
+    except Exception as e:
+        err(str(e))
+        err("请先同步主程序 app_info.py 与 installer/contract.py 的冻结常量")
         sys.exit(1)
 
     try:

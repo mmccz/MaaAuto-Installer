@@ -458,9 +458,13 @@ def request_main_exit(install_dir: Path,
             _log_cb(log, "主程序已被强制结束")
             return True
         _log_cb(log, "警告：taskkill 后主程序仍在运行")
+        # ★ 停不掉主程序时必须清掉刚写的 .upgrading，否则主程序下次启动即退出
+        clear_upgrading_flag(install_dir)
         return False
     except Exception as e:
         _log_cb(log, f"taskkill 失败: {e}")
+        # 同上：失败路径不能把“毒丸”标志留给主程序
+        clear_upgrading_flag(install_dir)
         return False
 
 

@@ -442,6 +442,8 @@ class UpgradeFlow:
         self.manifest = None
         self.skip_check = skip_check
         self.pre_check_info = pre_check_info
+        # 检查阶段的具体失败原因，供 run_full 写 upgrade_failed.flag 时使用
+        self._fail_reason = ""
 
     # ---- 内部回调 ----
     def _stage(self, key):
@@ -481,6 +483,70 @@ class UpgradeFlow:
                 return False
         return False
 
+    def _restart_if_needed(self, reason: str) -> bool:
+        """终态重启：仅当 --restart 且主程序当前确实不在运行。
+
+        升级器可能因“无更新 / 失败 / 用户取消”提前结束，此时主程序已经被
+        主程序自己退出或本进程停止，必须把它拉起来，避免用户看到
+        “应用自己关了”。若主程序仍在运行（如 --check-only 场景），不能重复启动。
+        """
+        if not getattr(self.args, "restart", False):
+            self.log.info(f"未指定 --restart，跳过重启主程序（{reason}）")
+            return False
+
+        try:
+            from installer.core.upgrade_engine import (
+                is_main_running, clear_upgrading_flag,
+            )
+        except Exception as e:
+            self.log.error(f"无法加载重启依赖，跳过重启: {e}")
+            return False
+
+        try:
+            if is_main_running():
+                self.log.info("主程序仍在运行，跳过重启")
+                return False
+        except Exception:
+            pass
+
+        # 重启前确保没有残留的 .upgrading，否则主程序启动后立即退出
+        try:
+            clear_upgrading_flag(self.install_dir)
+        except Exception:
+            pass
+
+        self._stage("restart")
+        self.log.info(f"重启主程序（{reason}）")
+        try:
+            ok = restart_main(self.install_dir, self.log)
+        except Exception as e:
+            self.log.error(f"重启主程序失败: {e}")
+            return False
+        if not ok:
+            self.log.warn("重启主程序失败，请手动启动")
+        return ok
+
+    def _write_failure(self, reason: str, info=None) -> None:
+        """写 ``upgrade_failed.flag``（仅“已经动过手”的失败路径调用）。
+
+        契约（主程序 Q2）：检查失败 / 已最新 / 用户取消不写；下载失败、
+        无法停止主程序、升级失败、已写过 .upgrading 的未捕获异常要写。
+        """
+        try:
+            from installer.core.upgrade_engine import write_failure_flag
+            write_failure_flag(
+                install_dir=self.install_dir,
+                from_version=(self.manifest.version
+                              if self.manifest is not None else "?"),
+                to_version=(getattr(info, "latest", "")
+                            if info is not None else ""),
+                reason=reason,
+                log_path=str(self.log.log_path or ""),
+            )
+            self.log.info(f"已写 upgrade_failed.flag: {reason}")
+        except Exception as e:
+            self.log.warn(f"写 upgrade_failed.flag 失败: {e}")
+
     # -------------------------------------------------------------- #
     def _do_check(self, check_update, read_manifest,
                   check_installer_version, DEFAULT_MIN_INSTALLER_VERSION):
@@ -490,6 +556,7 @@ class UpgradeFlow:
         self.manifest = read_manifest(self.install_dir)
         if self.manifest is None:
             self.log.error(f"找不到 .maaauto.json: {self.install_dir}")
+            self._fail_reason = "缺少安装信息 (.maaauto.json)"
             self._msg("未找到安装信息 (.maaauto.json)。\n"
                       "请通过完整安装包重新安装 MaaAuto。", "error")
             return None, 2
@@ -503,6 +570,7 @@ class UpgradeFlow:
             msg = (f"当前升级器版本过低（需要 ≥ {min_ver}）。\n\n"
                    f"请到 GitHub Releases 下载最新的完整安装包。")
             self.log.error(msg)
+            self._fail_reason = f"升级器版本过低（需要 ≥ {min_ver}）"
             self._msg(msg, "error")
             return None, 2
 
@@ -512,6 +580,7 @@ class UpgradeFlow:
                             allow_downgrade=allow_downgrade)
         if info.error:
             self.log.error(f"检查更新失败: {info.error}")
+            self._fail_reason = f"检查更新失败: {info.error}"
             self._msg(f"检查更新失败：\n{info.error}", "error")
             return None, 2
 
@@ -550,6 +619,7 @@ class UpgradeFlow:
                 perform_upgrade, check_installer_version,
                 request_main_exit,
                 write_failure_flag,
+                clear_upgrading_flag,
                 DEFAULT_MIN_INSTALLER_VERSION,
             )
         except Exception as e:
@@ -571,6 +641,9 @@ class UpgradeFlow:
             if self.manifest is None:
                 self.log.error(f"找不到 .maaauto.json: {self.install_dir}")
                 self._msg("未找到安装信息 (.maaauto.json)。", "error")
+                # Q2：run_full 以 2 结束且非取消 → 写失败标志（主程序下次启动提示重装）
+                self._write_failure("缺少安装信息 (.maaauto.json)")
+                self._restart_if_needed("缺少安装信息")
                 return 2
             self.log.info(f"（跳过检查）当前版本: {self.manifest.version}")
             self._stage("check")
@@ -581,8 +654,14 @@ class UpgradeFlow:
                 check_installer_version, DEFAULT_MIN_INSTALLER_VERSION
             )
             if code == 2:
+                # Q2（主程序 2026-10-17 修订）：run_full 以 2 结束且非用户取消
+                # 都要写 upgrade_failed.flag，否则 --silent 路径的失败没有告知渠道。
+                self._write_failure(self._fail_reason or "检查更新失败")
+                self._restart_if_needed("检查更新失败")
                 return 2
             if code == 1 or not info.has_update:
+                self.log.info("已是最新版本，无需升级")
+                self._restart_if_needed("已是最新")
                 return 1 if self.args.check_only else 0
 
         if self.args.check_only:
@@ -591,6 +670,7 @@ class UpgradeFlow:
 
         if self._cancelled():
             self.log.info("用户取消")
+            self._restart_if_needed("用户取消")
             return 0
 
         # ---- 下载 source.zip ----
@@ -610,10 +690,12 @@ class UpgradeFlow:
         except Exception as e:
             self.log.error(f"下载失败: {e}")
             self._msg(f"下载源码包失败：\n{e}", "error")
+            self._write_failure(f"下载源码包失败: {e}", info)
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
             except Exception:
                 pass
+            self._restart_if_needed("下载失败")
             return 2
 
         actual_sha = info.source_sha256 or sha256_of_file(source_zip)
@@ -625,6 +707,7 @@ class UpgradeFlow:
                 shutil.rmtree(work_dir, ignore_errors=True)
             except Exception:
                 pass
+            self._restart_if_needed("用户取消")
             return 0
 
         # ---- 停止主程序 ----
@@ -632,24 +715,47 @@ class UpgradeFlow:
         if not request_main_exit(self.install_dir, log=self._engine_log):
             self.log.error("无法停止主程序")
             self._msg("无法停止 MaaAuto 主程序，升级中止。", "error")
+            self._write_failure("无法停止主程序", info)
+            # ★ 停不掉时 .upgrading 已被写入，必须清掉，否则主程序下次启动即退
+            try:
+                clear_upgrading_flag(self.install_dir)
+            except Exception:
+                pass
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
             except Exception:
                 pass
+            self._restart_if_needed("无法停止主程序")
             return 2
 
         # ---- 执行升级 ----
-        result = perform_upgrade(
-            install_dir=self.install_dir,
-            source_zip=source_zip,
-            manifest=self.manifest,
-            installer_version=self.installer_version,
-            source_zip_sha256=actual_sha,
-            log=self._engine_log,
-            progress=self._progress,
-            on_stage=self._stage,
-            cancel_check=self._cancelled,
-        )
+        try:
+            result = perform_upgrade(
+                install_dir=self.install_dir,
+                source_zip=source_zip,
+                manifest=self.manifest,
+                installer_version=self.installer_version,
+                source_zip_sha256=actual_sha,
+                log=self._engine_log,
+                progress=self._progress,
+                on_stage=self._stage,
+                cancel_check=self._cancelled,
+            )
+        except Exception as e:
+            # perform_upgrade 内部已兜底；这里防“它在 try 之外就抛”的极端情况
+            self.log.error(f"升级异常: {e}")
+            self.log.error(traceback.format_exc())
+            self._write_failure(f"升级异常: {e}", info)
+            try:
+                clear_upgrading_flag(self.install_dir)
+            except Exception:
+                pass
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._restart_if_needed("升级异常")
+            return 2
 
         try:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -672,30 +778,37 @@ class UpgradeFlow:
             except Exception:
                 pass
 
-            self._stage("restart")
             time.sleep(1.0)
-            restart_main(self.install_dir, self.log)
+            self._restart_if_needed("升级成功")
             return 0
         else:
             reason = result.error or "未知错误"
+            cancelled = self._cancelled() or ("用户中止" in reason)
             self.log.error(f"升级失败: {reason}")
             if result.rolled_back:
                 self.log.info("已从备份回滚到原版本")
                 reason += "（已回滚到原版本）"
             else:
                 self.log.warn("回滚未成功")
-            try:
-                write_failure_flag(
-                    install_dir=self.install_dir,
-                    from_version=result.from_version,
-                    to_version=result.to_version,
-                    reason=reason,
-                    log_path=str(self.log.log_path or ""),
-                )
-            except Exception:
-                pass
+
+            # 用户主动取消不算升级失败，不写“失败标记”（下次启动不该提示）
+            if not cancelled:
+                try:
+                    write_failure_flag(
+                        install_dir=self.install_dir,
+                        from_version=result.from_version,
+                        to_version=result.to_version,
+                        reason=reason,
+                        log_path=str(self.log.log_path or ""),
+                    )
+                except Exception:
+                    pass
+            else:
+                self.log.info("用户取消升级，跳过 upgrade_failed.flag")
+
             self._msg(f"升级失败：\n{reason}\n\n日志：{self.log.log_path}",
                       "error")
+            self._restart_if_needed("用户取消" if cancelled else "升级失败")
             return 2
 
 

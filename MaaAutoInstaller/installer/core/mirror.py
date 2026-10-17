@@ -67,13 +67,23 @@ def resolve_pypi_mirror(key: str) -> str:
 
 
 def resolve_python_mirror(key: str, version: str) -> str:
-    """key ∈ {"auto","huawei","official"} 或直接 URL 模板。"""
+    """key ∈ {"auto","huawei","official"} 或直接 URL 模板。
+
+    注意：安装向导的「镜像源」下拉是 **PyPI** 的 key（tuna / aliyun / ustc /
+    pypi），它同时被传进本函数（见 pages/progress.py）。这些 key 没有对应的
+    embeddable Python 镜像，因此**按 auto 处理**（国内→华为云，其他→官方），
+    而不是回落到 python.org —— 否则国内用户选了国内源反而从官方站下载。
+    """
     if not key:
         key = "auto"
     if key.startswith(("http://", "https://")):
         return key.replace("{version}", version)
+
+    auto_tmpl = (PYTHON_MIRRORS["huawei"] if detect_is_china()
+                 else PYTHON_MIRRORS["official"])
     if key == "auto":
-        tmpl = PYTHON_MIRRORS["huawei"] if detect_is_china() else PYTHON_MIRRORS["official"]
+        tmpl = auto_tmpl
     else:
-        tmpl = PYTHON_MIRRORS.get(key, PYTHON_MIRRORS["official"])
+        # 显式指定的 huawei / official 生效；未知 key（含 PyPI 镜像 key）走 auto
+        tmpl = PYTHON_MIRRORS.get(key, auto_tmpl)
     return tmpl.format(version=version)

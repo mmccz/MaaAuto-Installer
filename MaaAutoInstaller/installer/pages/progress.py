@@ -24,6 +24,7 @@ from installer.core import (resolve_pypi_mirror, resolve_python_mirror,
                             Manifest, write_manifest,
                             remove_work_dir, clean_pip_cache, clean_system_temp,
                             build_all_stubs, unpack_stubs_source,register_all)
+from installer.contract import default_manifest_extra
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +274,16 @@ class InstallWorker(QThread):
             self._stage("page.progress.stage.prepare")
             self._log(f"安装目录: {install_dir}")
 
+            # ★ 清掉上一次异常升级/异常卸载可能残留的 .upgrading。
+            #   该文件会让主程序启动即退出；安装/覆盖安装时顺手清理最稳妥。
+            stale_flag = install_dir / "config" / ".upgrading"
+            try:
+                if stale_flag.exists():
+                    stale_flag.unlink()
+                    self._log("已清理残留的 config/.upgrading")
+            except Exception as e:
+                self._log(f"清理残留 .upgrading 失败（非致命）: {e}")
+
             work_dir = Path(tempfile.mkdtemp(
                 prefix="MaaAuto_build_",
                 dir=str(install_dir.parent),
@@ -428,17 +439,9 @@ class InstallWorker(QThread):
                 requirements_hash=s.requirements_hash,
                 mirror=s.mirror or "",
                 release_channel="stable",
-                # extra 用 Manifest 默认值（见 installer/core/manifest.py）
-                # 这里显式传，双保险
-                extra={
-                    "github_url": "https://github.com/mmccz/MaaAuto-Tool-works",
-                    "update_api": "https://api.github.com/repos/mmccz/MaaAuto-Tool-works/releases/latest",
-                    "release_channel": "stable",
-                    "launch_args": [],
-                    "source_asset_name": "MaaAuto_Source.zip",
-                    "online_asset_pattern": "MaaAuto_Online_*-Windows-x64.exe",
-                    "min_installer_version": "1.0.0",
-                },
+                # 契约常量集中定义在 installer/contract.py；
+                # build_installer.py 会在构建期断言它们与 app_info.py 一致。
+                extra=default_manifest_extra(),
             )
             write_manifest(install_dir, manifest)
             self._log(f"元数据: {install_dir / '.maaauto.json'}")
