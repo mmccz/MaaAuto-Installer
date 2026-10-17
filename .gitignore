@@ -1,3 +1,44 @@
+# ============================================================
+# MaaAuto-Installer .gitignore
+#
+# 这个仓库会把构建放在**仓库根目录**（见 build_installer.py 的
+# DIST_DIR / BUILD_DIR / EMBEDDED_DIR），所以必须在这里忽略，
+# 否则跑一次构建后 `git status` 会多出一堆待提交产物。
+# ============================================================
+
+# ---- 构建产物（build_installer.py）----
+build/
+dist/
+_embedded/
+*.spec
+
+# ---- 开发期单独打 stub（tools/build_stubs.py）----
+MaaAutoInstaller/tools/_out/
+_work_*/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 日志 / 临时文件 ----
+*.log
+*.bak
+*.tmp
+
+# ---- IDE / 操作系统 ----
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- 原有条目（保留，勿删）----
 # Object file
 *.o
 
