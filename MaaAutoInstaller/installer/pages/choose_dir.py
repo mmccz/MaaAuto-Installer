@@ -1,6 +1,5 @@
 """第 2 步：选择安装目录。"""
 
-import os
 from pathlib import Path
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,

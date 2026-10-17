@@ -18,7 +18,6 @@ PyInstaller 打包后 → tools/_out/upgrade.exe
   2  错误
 """
 
-import os
 import sys
 import json
 import time

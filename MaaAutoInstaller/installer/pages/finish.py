@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                               QWidget, QMessageBox)
+                               QMessageBox)
 from PySide6.QtCore import Qt
 
 from installer.pages.base import BasePage

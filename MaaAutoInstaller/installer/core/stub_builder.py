@@ -24,7 +24,6 @@ stubs_source.zip 结构约定（由 build_installer.py 生成）：
 """
 
 import os
-import sys
 import shutil
 import zipfile
 import subprocess

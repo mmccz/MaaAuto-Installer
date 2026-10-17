@@ -1,8 +1,7 @@
 """第 1 步：欢迎 + 语言选择。"""
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
-                               QComboBox, QWidget, QSizePolicy)
-from PySide6.QtCore import Qt
+                               QComboBox, QSizePolicy)
 
 from installer.pages.base import BasePage
 

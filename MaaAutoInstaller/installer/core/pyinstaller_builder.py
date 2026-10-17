@@ -7,7 +7,7 @@
 import subprocess
 import shutil
 import os
-import sys
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -27,6 +27,44 @@ def _log(logger, msg):
             logger(msg)
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# 复制（带重试）
+#
+# 升级/安装时刚写出的 exe、dll 常被杀软实时扫描短暂占用，Windows 会以
+# WinError 5 / 32 拒绝覆盖。不重试就会整轮失败并回滚，代价远大于等 0.4 秒。
+# --------------------------------------------------------------------------- #
+COPY_ATTEMPTS = 3
+COPY_RETRY_DELAY = 0.4
+
+
+def _with_retry(action, what, log=None,
+                attempts: int = COPY_ATTEMPTS,
+                delay: float = COPY_RETRY_DELAY):
+    """执行 action()，遇到 OSError 重试；最终仍失败则抛出最后一次异常。"""
+    last_error = None
+    for i in range(1, attempts + 1):
+        try:
+            return action()
+        except OSError as e:
+            last_error = e
+            if i < attempts:
+                _log(log, f"  {what} 失败（{e}），{delay}s 后重试（{i}/{attempts - 1}）")
+                time.sleep(delay)
+    raise last_error
+
+
+def _replace_file(src: Path, dst: Path):
+    if dst.exists():
+        dst.unlink()
+    shutil.copy2(src, dst)
+
+
+def _replace_dir(src: Path, dst: Path):
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
 
 
 def build_main_program(
@@ -73,8 +111,8 @@ def build_main_program(
 
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    # 关掉 PyInstaller 的 UPX 压缩，避免杀软误报
-    env["PYI_DISABLE_UPX"] = "1"
+    # UPX 由主程序 build.py 的 --noupx 关闭（PyInstaller 不认 PYI_DISABLE_UPX
+    # 这个环境变量，以前那行等于没生效）。
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     env["PYTHONUTF8"] = "1"
@@ -165,14 +203,12 @@ def copy_dist_to_install(
 
         dst = install_dir / item.name
         if item.is_dir():
-            if dst.exists():
-                shutil.rmtree(dst, ignore_errors=True)
-            shutil.copytree(item, dst)
+            _with_retry(lambda: _replace_dir(item, dst),
+                        f"复制目录 {item.name}", log)
             copied += sum(1 for _ in dst.rglob("*") if _.is_file())
         else:
-            if dst.exists():
-                dst.unlink()
-            shutil.copy2(item, dst)
+            _with_retry(lambda: _replace_file(item, dst),
+                        f"复制文件 {item.name}", log)
             copied += 1
 
     msg = f"已复制 {copied} 个文件"

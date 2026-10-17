@@ -2,7 +2,6 @@
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
                                QCheckBox, QFrame)
-from PySide6.QtCore import Qt
 
 from installer.pages.base import BasePage
 

@@ -1,6 +1,5 @@
 """第 4 步：安装进度（新流程：用户本地打包主程序）。"""
 
-import os
 import re
 import sys
 import ctypes

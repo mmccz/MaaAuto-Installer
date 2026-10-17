@@ -1,7 +1,6 @@
 """统一下载工具（urllib 实现，支持进度回调 + 镜像回退）。"""
 
 import os
-import shutil
 import urllib.request
 import urllib.error
 from pathlib import Path

@@ -27,7 +27,6 @@
 
 import os
 import re
-import sys
 import json
 import time
 import shutil
@@ -39,11 +38,11 @@ import subprocess
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Callable, Optional, Tuple, List, Dict, Any
-from dataclasses import dataclass, field
+from typing import Callable, Optional, Tuple, List
+from dataclasses import dataclass
 
 from installer.core.mirror import (resolve_pypi_mirror, resolve_python_mirror)
-from installer.core.downloader import download_file, DownloadError
+from installer.core.downloader import download_file
 from installer.core.python_env import (install_embedded_python, verify_python,
                                        get_python_version, PYTHON_VERSION)
 from installer.core.pip_installer import (ensure_pip, install_requirements,
@@ -51,10 +50,12 @@ from installer.core.pip_installer import (ensure_pip, install_requirements,
 from installer.core.pyinstaller_builder import (build_main_program,
                                                 copy_dist_to_install)
 from installer.core.source_deployer import (unpack_source, hash_requirements)
+# 注意：本模块同时充当 upgrade_stub 的「门面」，下面这些名字会被
+# tools/upgrade_stub.py 以 `from installer.core.upgrade_engine import ...`
+# 转手导入。删改前先 grep 一遍，别当成未使用导入清理掉。
 from installer.core.manifest import (Manifest, read_manifest, write_manifest,
-                                     MANIFEST_NAME, MANIFEST_VERSION)
-from installer.core.cleanup import (remove_work_dir, clean_pip_cache,
-                                    clean_system_temp)
+                                     MANIFEST_NAME)
+from installer.core.cleanup import (remove_work_dir, clean_system_temp)
 
 
 # --------------------------------------------------------------------------- #
@@ -71,8 +72,11 @@ DEFAULT_MIN_INSTALLER_VERSION = "1.0.0"
 
 USER_AGENT = "MaaAuto-UpgradeStub/1.0"
 
-# 停止主程序的默认超时（秒）—— 5 秒给主程序 kill_all_related_processes 留足时间
-DEFAULT_EXIT_TIMEOUT = 5.0
+# 停止主程序的默认超时（秒）
+# 主程序收到 .upgrading 后要：保存窗口几何 + 等 Worker 线程退出（最多 3s）
+# + 杀掉 MAA/模拟器 + Qt 退出。5s 在慢机器上偏紧，一旦超时就会 taskkill 强杀，
+# 强杀途中有可能丢掉「正在输入但未失焦」的配置项，所以放宽到 15s。
+DEFAULT_EXIT_TIMEOUT = 15.0
 
 
 # --------------------------------------------------------------------------- #
