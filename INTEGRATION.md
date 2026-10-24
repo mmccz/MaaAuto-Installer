@@ -1,7 +1,7 @@
 # MaaAuto 安装器 ↔ 主程序 对接说明
 
-> 面向仓库：`mmccz/MaaAuto-Tool-works`（主程序，当前 `APP_VERSION = 2.1.0`）
-> 本文对应：`MaaAuto-Installer` 安装器 `1.0.0`（`manifest_version = 3`）
+> 面向仓库：`mmccz/MaaAuto-Tool-works`（主程序，当前 `APP_VERSION = 2.1.1`）
+> 本文对应：`MaaAuto-Installer` 安装器 `1.0.1`（`manifest_version = 3`）
 > 状态：主程序已答复（2026-10-17）；本文件已按答复回填决议
 > 目的：把两边已经耦合、但分散在代码里的约定集中成一份可核对的清单，避免升级链路各自演进后对不上。
 > 对应主程序侧文档：[`INSTALLER_INTEGRATION.md`](../MaaAuto-Tool-works/docs/INSTALLER_INTEGRATION.md)；主程序答复：[`INSTALLER_REPLY.md`](../MaaAuto-Tool-works/docs/INSTALLER_REPLY.md)；安装器侧逐条回复见 [`docs/INSTALLER_RESPONSE.md`](docs/INSTALLER_RESPONSE.md)。
@@ -272,8 +272,8 @@ re.search(r'^APP_VERSION\s*=\s*["\']([^"\']*)["\']', text, re.M)
 
 要求：
 
-- `APP_VERSION = "2.1.0"` 必须**单独一行、从行首开始**。
-- 不要改成 `APP_VERSION: str = "2.1.0"`、`APP_VERSION = str(2.1)`、多行拼接或从环境变量读取；否则安装器读到 `0.0.0`，导致 manifest 版本、产物文件名全部错误。
+- `APP_VERSION = "2.1.1"` 必须**单独一行、从行首开始**。
+- 不要改成 `APP_VERSION: str = "2.1.1"`、`APP_VERSION = str(2.1)`、多行拼接或从环境变量读取；否则安装器读到 `0.0.0`，导致 manifest 版本、产物文件名全部错误。
 - `APP_UPDATE_API`、`APP_MIN_INSTALLER_VERSION`、`APP_SOURCE_ASSET` 目前与安装器硬编码值重复，改动需同步（见 §12-Q5）。
 
 ### 7.2 `build.py`
