@@ -82,8 +82,11 @@ upgrade.exe：读 .maaauto.json → 重新查询 Release
 命令行（与 2.x 一致，主程序无需改动）：
 
 ```text
-upgrade.exe --from-main [--restart] [--silent] [--check-only] [--downgrade]
+upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui] [--downgrade]
 ```
+
+- `--silent`：显示不可交互的进度窗（2.x 的既定语义）；
+- `--no-ui`：完全无窗口，只写日志，供自动化 / CI 使用。
 
 退出码：`0` 成功/有新版本，`1` 仅 `--check-only` 且已最新，`2` 错误。
 

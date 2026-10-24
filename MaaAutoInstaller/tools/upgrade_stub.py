@@ -5,8 +5,11 @@
 
 命令行（与 2.x 保持一致，主程序无需改调用方式）::
 
-    upgrade.exe --from-main [--restart] [--silent] [--check-only]
+    upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui]
                 [--downgrade] [--channel stable|beta]
+
+``--no-ui`` 完全无窗口，只写日志，供自动化/CI 使用；``--silent`` 仍显示
+一个不可交互的进度窗（2.x 的既定语义）。
 
 退出码：0 成功/有新版本；1 仅 --check-only 且已最新；2 错误。
 """
@@ -56,6 +59,8 @@ def parse_args(argv):
     p.add_argument("--restart", action="store_true")
     p.add_argument("--downgrade", action="store_true")
     p.add_argument("--channel", default="stable", choices=["stable", "beta"])
+    p.add_argument("--no-ui", action="store_true",
+                   help="完全无界面（自动化/CI）；进度只写日志")
     p.add_argument("--debug", action="store_true")
     args, _unknown = p.parse_known_args(argv)
     return args
@@ -398,9 +403,6 @@ def run_ui(args, log: Logger, mode: str = "upgrade") -> int:
                                    QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout)
 
     class Worker(QThread):
-        stage = Signal(str)
-        progress = Signal(int, int)
-        message = Signal(str, str)
         finished_code = Signal(int)
 
         def __init__(self, flow):
@@ -415,6 +417,12 @@ def run_ui(args, log: Logger, mode: str = "upgrade") -> int:
             self.finished_code.emit(code)
 
     class Dialog(QDialog):
+        # 升级流程跑在 Worker 线程里；这些信号负责把进度安全地排队到 UI 线程。
+        # 绝不能把 self._on_xxx 直接交给流程当回调 —— 那是跨线程操作控件，会崩。
+        sig_stage = Signal(str)
+        sig_progress = Signal(int, int)
+        sig_message = Signal(str, str)
+
         def __init__(self):
             super().__init__()
             self.setWindowTitle(APP_TITLE_SILENT if args.silent else APP_TITLE)
@@ -445,15 +453,15 @@ def run_ui(args, log: Logger, mode: str = "upgrade") -> int:
 
             self.flow = UpgradeFlow(
                 args, log,
-                on_stage=self._on_stage,
-                on_progress=self._on_progress,
-                on_message=self._on_message,
+                on_stage=self.sig_stage.emit,
+                on_progress=self.sig_progress.emit,
+                on_message=self.sig_message.emit,
                 cancel_check=lambda: self.cancelled,
             )
+            self.sig_stage.connect(self._on_stage)
+            self.sig_progress.connect(self._on_progress)
+            self.sig_message.connect(self._on_message)
             self.worker = Worker(self.flow)
-            self.worker.stage.connect(self._on_stage)
-            self.worker.progress.connect(self._on_progress)
-            self.worker.message.connect(self._on_message)
             self.worker.finished_code.connect(self._on_finished)
 
         def _on_cancel(self):
@@ -516,7 +524,7 @@ def main() -> int:
         return 0
 
     try:
-        if args.silent and args.check_only:
+        if args.no_ui or (args.silent and args.check_only):
             return run_headless(args, log)
         return run_ui(args, log, mode="silent" if args.silent else "upgrade")
     except Exception:

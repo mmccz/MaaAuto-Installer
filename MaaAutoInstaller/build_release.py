@@ -352,6 +352,10 @@ def main() -> int:
             print(f"  {p.name:<52} {human(p.stat().st_size):>10}")
         print()
         print("README / Release 正文可直接引用 SHA256SUMS.txt")
+        print()
+        print("提示：如果本仓库目录被安全软件/沙箱标记为低完整性（Low IL），")
+        print("      从 dist/ 直接双击安装包会报「无法创建目录 is-*.tmp，错误 5」。")
+        print("      把 exe 复制到桌面或下载目录再运行即可。")
         return 0
 
     except Exception as e:
