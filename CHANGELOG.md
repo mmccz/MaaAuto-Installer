@@ -4,6 +4,36 @@
 
 ---
 
+## [3.0.0] - 2026-10-24
+
+**架构重构**：安装与升级都不再在用户机上编译。
+
+### 变更
+
+- **安装包改用 Inno Setup**：新增 `packaging/installer.iss`（完整包）与 `packaging/online.iss`（在线引导包）。
+  - 默认 per-user 安装（`%LOCALAPPDATA%\Programs\MaaAuto`，免 UAC），向导可选「为所有用户安装」到 `Program Files`。
+  - 卸载、快捷方式、卸载项、旧 `RUNASADMIN` 标志清理全部由安装包完成；卸载时询问是否保留 `config`/`logs`。
+- **主程序改为预构建**：构建脚本不再内嵌源码在用户机打包，改为 `build_release.py` 在 CI/开发机完成，产物是 payload。
+- **升级器重写为 payload 替换**（`installer/core/payload.py`）：下载 → sha256 校验 → 解压 → 逐文件备份替换 → 失败回滚 → 更新 manifest → 重启。
+- **`upgrade.exe` 随 payload 分发并更新**：运行中的旧 exe 改名 `.old` 让位，下次启动清理——消除了「升级器修复对存量用户不生效」的限制。
+- **在线引导包**：约 2 MB，下载完整安装包并校验 sha256 后交给它安装。
+- 删除整条旧链路：`pages/`、`wizard.py`、`app.py`、`state.py`、`python_env.py`、`pip_installer.py`、`pyinstaller_builder.py`、`source_deployer.py`、`stub_builder.py`、`uninstall_stub.py`、`build_stubs.py`、`mirror.py`（不再需要下载 Python / 装依赖）。
+- **新增 CI**：`.github/workflows/release.yml`，推 `v*` tag 自动构建并挂草稿 Release。
+
+### 体积
+
+- 裁剪规则（`packaging/trim_payload.py`）：移除 Qt Quick/QML、Qt PDF/SVG、软件 OpenGL、cv2 视频后端，实测 −67 MB；payload 205 MB，安装包约 100 MB。
+
+### 契约
+
+- `installer/contract.py` 新增 `payload_asset_prefix`，`min_installer_version` 提升到 `3.0.0`；`APP_INFO_CONSTANTS` 增加 `APP_PAYLOAD_ASSET_PREFIX`，构建期强校验。
+
+### 兼容
+
+- 2.x 用户首次升级仍由旧 `upgrade.exe` 走 Source.zip 重编译，成功后进入 payload 模式（3.0.0 的 Release 同时上传 `MaaAuto_Source.zip`）。
+
+---
+
 ## [1.0.1] - 2026-10-24
 
 配合主程序 2.1.1 发布。重点是**升级链路的可靠性**。
