@@ -144,8 +144,13 @@ def check_contract(source_dir: Path) -> dict:
 # --------------------------------------------------------------------------- #
 def run(cmd, cwd: Path, timeout: int = 3600, tag: str = "") -> None:
     log(f"执行{(' ' + tag) if tag else ''}: {' '.join(str(c) for c in cmd)}")
+    # 子进程也要 UTF-8：CI runner 的默认 stdout 是 cp1252，
+    # build.py / PyInstaller 打印中文会直接 UnicodeEncodeError。
+    child_env = dict(os.environ)
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
     proc = subprocess.Popen(
-        [str(c) for c in cmd], cwd=str(cwd),
+        [str(c) for c in cmd], cwd=str(cwd), env=child_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
     )
