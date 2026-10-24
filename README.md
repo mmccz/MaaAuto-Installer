@@ -165,9 +165,19 @@ $app = "$env:LOCALAPPDATA\Programs\MaaAuto"
 加 `--corrupt-digest` 可让校验必定失败，用来验证「回滚 + 写
 `upgrade_failed.flag`」；测完记得重装，或把 `extra.update_api` 改回 GitHub 地址。
 
+### 发版验证脚本
+
+```powershell
+# 安装包 E2E：静默安装 → 内容校验 → 假 Release 升级 → 卸载（发版前本机跑）
+python tools\verify_release.py 1.1.0
+
+# 发布后元数据：Release/digest/公告源（不下载大文件，发版后跑）
+python tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.1.0
+```
+
 ### CI
 
-`.github/workflows/release.yml` **位于主程序仓库**（Release 与 tag 都在那边）：推 `v*` tag 后检出本仓库、装依赖与 Inno、跑 `build_release.py`，把三个资产 + `SHA256SUMS.txt` 挂到草稿 Release；tag 含 `b` / `rc` 时自动标记为 prerelease。
+`.github/workflows/release.yml` **位于主程序仓库**（Release 与 tag 都在那边）：推 `v*` tag 后检出本仓库、装依赖与 Inno、跑 `build_release.py`，把 4 个资产（Setup / Online / payload / SHA256SUMS）挂到 Release；正文取主程序仓库的 `RELEASE_NOTES.md`，构建成功**直接发布**（`draft: false`），tag 含 `b` / `rc` 时自动标记为 prerelease。发布后建议跑一遍 `tools\verify_release_meta.py` 复核。
 
 ---
 
