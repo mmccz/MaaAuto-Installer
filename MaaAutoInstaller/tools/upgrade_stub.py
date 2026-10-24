@@ -408,115 +408,39 @@ STAGE_TEXT = {
 
 
 def run_ui(args, log: Logger, mode: str = "upgrade") -> int:
-    from PySide6.QtCore import QThread, Signal, QTimer
-    from PySide6.QtWidgets import (QApplication, QDialog, QLabel, QProgressBar,
-                                   QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout)
+    """进度窗（纯 ctypes/Win32）。
 
-    class Worker(QThread):
-        finished_code = Signal(int)
+    流程跑在 ``threading.Thread`` 里；窗口的 ``post_stage`` / ``post_progress``
+    / ``post_message`` 只把值塞进槽位再 ``PostMessageW``，绝不跨线程直接
+    ``SetWindowTextW`` —— 那样会偶发 0xC0000005（历史上真崩过），这和原来
+    「回调必须走 Qt Signal」是同一个约束。
+    """
+    from installer.core.native_ui import NativeProgressWindow
 
-        def __init__(self, flow):
-            super().__init__()
-            self.flow = flow
+    window = NativeProgressWindow(
+        title=APP_TITLE_SILENT if args.silent else APP_TITLE,
+        silent=bool(args.silent),
+        stage_text=STAGE_TEXT,
+        check_only=bool(args.check_only),
+        close_delay_ms=800 if (args.silent or args.check_only) else 2500,
+    )
 
-        def run(self):
-            try:
-                code = self.flow.run_check_only() if args.check_only else self.flow.run_full()
-            except Exception:
-                code = 2
-            self.finished_code.emit(code)
+    flow = UpgradeFlow(
+        args, log,
+        on_stage=window.post_stage,
+        on_progress=window.post_progress,
+        on_message=window.post_message,
+        cancel_check=window.is_cancelled,
+    )
 
-    class Dialog(QDialog):
-        # 升级流程跑在 Worker 线程里；这些信号负责把进度安全地排队到 UI 线程。
-        # 绝不能把 self._on_xxx 直接交给流程当回调 —— 那是跨线程操作控件，会崩。
-        sig_stage = Signal(str)
-        sig_progress = Signal(int, int)
-        sig_message = Signal(str, str)
+    def task() -> int:
+        try:
+            return flow.run_check_only() if args.check_only else flow.run_full()
+        except Exception:
+            log.error(f"升级流程异常:\n{traceback.format_exc()}")
+            return 2
 
-        def __init__(self):
-            super().__init__()
-            self.setWindowTitle(APP_TITLE_SILENT if args.silent else APP_TITLE)
-            self.setMinimumSize(520, 380)
-            self.cancelled = False
-            self.code = None
-
-            lay = QVBoxLayout(self)
-            self.stage_label = QLabel("准备中…")
-            self.stage_label.setStyleSheet("font-size:14px;font-weight:600;")
-            lay.addWidget(self.stage_label)
-
-            self.bar = QProgressBar()
-            self.bar.setRange(0, 100)
-            lay.addWidget(self.bar)
-
-            self.log_view = QTextEdit()
-            self.log_view.setReadOnly(True)
-            lay.addWidget(self.log_view, 1)
-
-            row = QHBoxLayout()
-            row.addStretch(1)
-            self.btn = QPushButton("后台升级中…" if args.silent else "取消")
-            self.btn.setEnabled(not args.silent)
-            self.btn.clicked.connect(self._on_cancel)
-            row.addWidget(self.btn)
-            lay.addLayout(row)
-
-            self.flow = UpgradeFlow(
-                args, log,
-                on_stage=self.sig_stage.emit,
-                on_progress=self.sig_progress.emit,
-                on_message=self.sig_message.emit,
-                cancel_check=lambda: self.cancelled,
-            )
-            self.sig_stage.connect(self._on_stage)
-            self.sig_progress.connect(self._on_progress)
-            self.sig_message.connect(self._on_message)
-            self.worker = Worker(self.flow)
-            self.worker.finished_code.connect(self._on_finished)
-
-        def _on_cancel(self):
-            self.cancelled = True
-            self.btn.setEnabled(False)
-            self.stage_label.setText("正在取消…")
-
-        def _on_stage(self, key):
-            self.stage_label.setText(STAGE_TEXT.get(key, key))
-            self.log_view.append(f"· {STAGE_TEXT.get(key, key)}")
-
-        def _on_progress(self, cur, total):
-            self.bar.setRange(0, max(1, total))
-            self.bar.setValue(cur)
-
-        def _on_message(self, text, level):
-            self.log_view.append(text)
-
-        def _on_finished(self, code):
-            self.code = code
-            if code == 0:
-                self.stage_label.setText("升级完成，正在重启…")
-                self.bar.setValue(self.bar.maximum())
-            elif code == 1:
-                self.stage_label.setText("已是最新版本")
-            else:
-                self.stage_label.setText("升级失败，详见日志")
-            delay = 800 if (args.silent or args.check_only) else 2500
-            QTimer.singleShot(delay, self.accept)
-
-        def reject(self):
-            # silent 模式不允许关窗打断升级
-            if args.silent and self.code is None:
-                return
-            super().reject()
-
-    app = QApplication.instance() or QApplication(sys.argv)
-    dlg = Dialog()
-    dlg.worker.start()
-    dlg.exec()
-    try:
-        dlg.worker.wait(3000)
-    except Exception:
-        pass
-    return dlg.code if dlg.code is not None else 2
+    return window.run(task)
 
 
 # --------------------------------------------------------------------------- #

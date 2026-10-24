@@ -76,16 +76,33 @@ AllowNoIcons=yes
 Name: "cn"; MessagesFile: "languages\ChineseSimplified.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+cn.CreateStartMenuIcon=创建开始菜单快捷方式
+en.CreateStartMenuIcon=Create a Start Menu shortcut
+
 [Tasks]
+; 开始菜单快捷方式做成可选项（1.0.6）：有些用户只用桌面图标/任务栏，不想被塞
+; 开始菜单条目；默认勾选，保持老用户升级后的行为不变。
+Name: "startmenuicon"; Description: "{cm:CreateStartMenuIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 Source: "{#MyPayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\MaaAuto"; Filename: "{app}\MaaAuto.exe"
-Name: "{group}\{cm:UninstallProgram,MaaAuto}"; Filename: "{uninstallexe}"
+Name: "{group}\MaaAuto"; Filename: "{app}\MaaAuto.exe"; Tasks: startmenuicon
+Name: "{group}\{cm:UninstallProgram,MaaAuto}"; Filename: "{uninstallexe}"; Tasks: startmenuicon
 Name: "{autodesktop}\MaaAuto"; Filename: "{app}\MaaAuto.exe"; Tasks: desktopicon
+
+; 卸载时兜底清掉开始菜单组。
+;
+; 实测（1.0.5 验证）：卸载器会删掉「卸载 MaaAuto」快捷方式，却经常把
+; 「MaaAuto.lnk」和整个组目录留下（Inno 自己的卸载记录没能清掉，尤其是先升级
+; 再卸载、或外壳正持有该目录句柄时）。这台机器上它过了几分钟才被系统回收，
+; 用户当场看就是「卸载没干净」。直接 filesandordirs 删整个 {group} 目录，
+; 反正这个目录只属于本程序。
+[UninstallDelete]
+Type: filesandordirs; Name: "{group}"
 
 [Run]
 ; shellexec 必需：主程序 manifest 要求管理员，用 CreateProcess 直接起会报
@@ -160,9 +177,49 @@ begin
   end;
 end;
 
+{ MaaAuto.exe 是否还在运行。
+  卸载器有 ParamStr 但没有进程 API，这里用 tasklist + find 的退出码判断。 }
+function IsAppRunning(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  if Exec(ExpandConstant('{cmd}'),
+       '/c tasklist /FI "IMAGENAME eq MaaAuto.exe" /NH | find /I "MaaAuto.exe" >nul',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := (ResultCode = 0);
+end;
+
+{ 让正在运行的主程序优雅退出。
+
+为什么要用 .upgrading 握手而不是直接 taskkill：
+本安装包默认 per-user、卸载器**不提权**，而主程序 exe 的清单要求管理员。
+低完整性进程 kill 不掉高完整性进程（taskkill 返回「拒绝访问」），
+文件就删不干净——这正是用户反馈「卸载后还剩一堆东西」。
+主程序每秒轮询 config\.upgrading，写这个文件它就会保存配置后自己退出，
+既不需要 UAC，也不会留下半截状态。 }
+function AskAppToExit(TimeoutMs: Integer): Boolean;
+var
+  FlagPath: String;
+  Waited: Integer;
+begin
+  FlagPath := ExpandConstant('{app}\config\.upgrading');
+  ForceDirectories(ExpandConstant('{app}\config'));
+  SaveStringToFile(FlagPath, 'uninstall', False);
+
+  Waited := 0;
+  while (Waited < TimeoutMs) and IsAppRunning() do
+  begin
+    Sleep(300);
+    Waited := Waited + 300;
+  end;
+
+  Result := not IsAppRunning();
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  DataDir: String;
+  DataDir, FlagPath: String;
   Purge: Boolean;
   ResultCode: Integer;
   I: Integer;
@@ -172,11 +229,18 @@ begin
     CleanLegacyRegistry();
 
     { 先把主程序停掉：它可能正在运行并占用 _internal 里的 DLL，
-      否则 Inno 删不掉文件，用户会看到「卸载没搞干净」。 }
-    Exec(ExpandConstant('{cmd}'),
-         '/c taskkill /F /IM MaaAuto.exe /T >nul 2>&1', '',
-         SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(800);
+      否则 Inno 删不掉文件，用户会看到「卸载没搞干净」。
+      顺序：握手让主程序自己退出 → 还在就 taskkill（同权限下有效）→ 兜底提示。 }
+    if IsAppRunning() then
+    begin
+      if not AskAppToExit(12000) then
+      begin
+        Exec(ExpandConstant('{cmd}'),
+             '/c taskkill /F /IM MaaAuto.exe /T >nul 2>&1', '',
+             SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Sleep(1000);
+      end;
+    end;
 
     { /PURGEDATA 强制连用户数据一起删；否则询问，默认保留。
       卸载器里没有 CmdLineParamExists，用 ParamStr 遍历。 }
@@ -197,9 +261,21 @@ begin
       DelTree(DataDir, True, True, True);
       DataDir := ExpandConstant('{app}\logs');
       DelTree(DataDir, True, True, True);
+    end
+    else
+    begin
+      { 保留用户数据时要清掉握手文件，否则重装后主程序一启动就自己退出 }
+      DeleteFile(ExpandConstant('{app}\config\.upgrading'));
     end;
+
     DeleteFile(ExpandConstant('{app}\.maaauto.json'));
     { 升级残留的 .old exe 与临时目录 }
     DeleteFile(ExpandConstant('{app}\upgrade.exe.old'));
+
+    { 进程真的没退掉时明确告诉用户，而不是留下半截目录 }
+    if IsAppRunning() then
+      MsgBox('MaaAuto 仍在运行，可能无法结束它（权限不足）。' + #13#10 +
+             '请手动退出程序后重新卸载，否则部分文件会残留。',
+             mbError, MB_OK);
   end;
 end;

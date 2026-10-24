@@ -42,7 +42,10 @@ PROTECTED_TOP = {"config", "logs", MANIFEST_NAME}
 # 主程序收到 .upgrading 后要保存配置、等任务线程、杀子进程、退出 Qt
 DEFAULT_EXIT_TIMEOUT = 15.0
 
-DEFAULT_MIN_INSTALLER_VERSION = "3.0.0"
+# 清单里没有 extra.min_installer_version 时（1.0.0 之前装的旧版本）的兜底下限。
+# 必须与 installer/contract.py 的 min_installer_version 基线一致：
+# 之前写的是 3.0.0 —— 版本号重置后 1.x 的升级器永远「过旧」，老用户会被卡住。
+DEFAULT_MIN_INSTALLER_VERSION = "1.0.0"
 USER_AGENT = "MaaAutoUpgradeStub/3.0"
 
 _OLD_SUFFIX = ".old"

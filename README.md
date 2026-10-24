@@ -6,7 +6,7 @@
 
 **MaaAuto 的打包与升级仓库** —— Inno Setup 安装包 + payload 升级器
 
-[![Version](https://img.shields.io/badge/version-1.0.0-2f81f7.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0-2f81f7.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://github.com/mmccz/MaaAuto-Installer/releases)
 [![Main App](https://img.shields.io/badge/main%20app-MaaAuto--Tool--works-6f42c1.svg)](https://github.com/mmccz/MaaAuto-Tool-works)
@@ -99,10 +99,14 @@ upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui] [--chann
 
 ```powershell
 cd MaaAutoInstaller
-pip install -r requirements.txt      # PySide6 + psutil
+pip install -r requirements.txt      # psutil（upgrade.exe 已不再需要 PySide6）
 pip install pyinstaller
 winget install JRSoftware.InnoSetup  # 提供 ISCC.exe
 ```
+
+> `upgrade.exe` 的进度窗是纯 ctypes/Win32（`installer/core/native_ui.py`），
+> 1.0.2 起体积从 43 MB 降到 7.5 MB。跑主程序 `build.py` 仍然需要 PySide6，
+> 那是主程序自己的依赖，与本仓库无关。
 
 还需要主程序源码目录（默认自动探测同级仓库，或 `--source-dir` 指定）。
 
@@ -122,6 +126,44 @@ python build_release.py --source-dir ..\..\MaaAuto-Tool-works\MaaAutoProject
 流程：**契约校验** → 主程序 `build.py` → 复制并裁剪 payload（约 −67 MB）→ PyInstaller 打包 `upgrade.exe` → 压缩 payload（LZMA）→ Inno 编译完整包 → 计算 sha256 → Inno 编译在线包 → 写 `dist/SHA256SUMS.txt`。
 
 产物在 `dist/`。
+
+### 测试
+
+```powershell
+cd ..                 # 仓库根
+pip install pytest
+python -m pytest tests -q
+```
+
+覆盖：版本解析/比较、payload 资产匹配与 stable/beta 频道选择、
+`.maaauto.json` 读写契约、payload 替换（`config/` `logs/` 受保护）/
+路径穿越拒绝/中途失败回滚、假 Release 服务器本身，以及「`upgrade.exe`
+不许再 import PySide6/PyQt/tkinter」的回归测试（守住 43 MB → 7.5 MB 的瘦身成果）。
+纯逻辑测试，不联网、不需要图形界面，CI 里随主程序仓库一起跑。
+
+### 手工验证升级链路（不用发版也能测）
+
+`tools/fake_release_server.py` 用 `http.server` 模拟 GitHub Releases API，
+把本地构建的 payload 当作「远端资产」，于是升级器会完整跑一遍
+查版本 → 下载 → sha256 校验 → 停主程序 → 替换 → 更新 manifest：
+
+```powershell
+# ① 起假服务器（顺手把测试安装的 update_api 指向本机、版本改成 1.0.0）
+python tools\fake_release_server.py --payload ..\dist\MaaAuto_payload_v1.0.x.zip `
+    --port 8765 --patch-manifest "$env:LOCALAPPDATA\Programs\MaaAuto"
+
+# ② 另开窗口：只检查 / 真正升级
+#    upgrade.exe 是 GUI 子系统程序，用 & 调用不会等待、也拿不到退出码，
+#    必须 Start-Process -Wait -PassThru。
+$app = "$env:LOCALAPPDATA\Programs\MaaAuto"
+(Start-Process -Wait -PassThru -FilePath "$app\upgrade.exe" `
+    -ArgumentList '--from-main','--check-only','--no-ui').ExitCode
+(Start-Process -Wait -PassThru -FilePath "$app\upgrade.exe" `
+    -ArgumentList '--from-main','--no-ui').ExitCode
+```
+
+加 `--corrupt-digest` 可让校验必定失败，用来验证「回滚 + 写
+`upgrade_failed.flag`」；测完记得重装，或把 `extra.update_api` 改回 GitHub 地址。
 
 ### CI
 

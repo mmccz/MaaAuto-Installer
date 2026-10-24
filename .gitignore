@@ -9,6 +9,9 @@ MaaAutoInstaller/_build/
 dist/
 *.spec
 
+# 手工验证用的一次性脚本 / 截图（UI 检查、慢速假 API 等），不入库
+/_build/
+
 # ---- 旧版本残留路径（兼容 2.x 脚本）----
 build/
 _embedded/
