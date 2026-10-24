@@ -248,10 +248,14 @@ def make_payload_zip(payload: Path, upgrade_exe: Path, version: str,
 def compile_installer(version: str, info: dict, payload_dir: Path,
                       iscc: Path) -> Path:
     exe_name = f"MaaAuto_Setup_v{version}-Windows-x64.exe"
+    # Inno 的 VersionInfoVersion 只接受纯数字：1.0.1b1 → 1.0.1.0
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+    quad = f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0" if m else "0.0.0.0"
     log("编译完整安装包（Inno Setup）...")
     run([
         iscc,
         f"/DMyAppVersion={version}",
+        f"/DMyVersionQuad={quad}",
         f"/DMyInstallerVersion={read_installer_version()}",
         f"/DMyUpdateApi={info['APP_UPDATE_API']}",
         f"/DMyPayloadPrefix={info['APP_PAYLOAD_ASSET_PREFIX']}",

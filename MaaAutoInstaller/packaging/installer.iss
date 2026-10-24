@@ -36,6 +36,10 @@
 #ifndef MySetupBase
   #define MySetupBase "MaaAuto_Setup_v" + MyAppVersion + "-Windows-x64"
 #endif
+; Inno 的 VersionInfoVersion 只接受纯数字，预发布版本需要把 b1/rc1 剥掉
+#ifndef MyVersionQuad
+  #define MyVersionQuad "0.0.0.0"
+#endif
 
 [Setup]
 AppId={{6F3A2C1E-8B4D-4E7A-9C15-3D02A7B9E4C1}
@@ -46,7 +50,7 @@ AppPublisher=mmccz
 AppPublisherURL=https://github.com/mmccz/MaaAuto-Tool-works
 AppSupportURL=https://github.com/mmccz/MaaAuto-Tool-works/issues
 AppUpdatesURL=https://github.com/mmccz/MaaAuto-Tool-works/releases
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion={#MyVersionQuad}
 VersionInfoDescription=MaaAuto Setup
 DefaultDirName={autopf}\MaaAuto
 DefaultGroupName=MaaAuto
