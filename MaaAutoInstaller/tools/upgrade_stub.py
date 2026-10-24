@@ -23,6 +23,13 @@ import time
 import traceback
 from pathlib import Path
 
+# 控制台编码在部分环境下是 cp1252，打印中文日志会崩；统一切 UTF-8。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # 兼容两种布局：① 仓库里 tools/upgrade_stub.py ② 打包后的根目录
 _HERE = Path(__file__).resolve().parent
 if (_HERE / "installer").is_dir():

@@ -22,6 +22,14 @@ import traceback
 import zipfile
 from pathlib import Path
 
+# CI 的 runner 默认 stdout 编码是 cp1252，打印中文日志会直接 UnicodeEncodeError。
+# 在 import 之后立刻切成 UTF-8，本地与 CI 行为一致。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = Path(__file__).resolve().parent          # MaaAutoInstaller/
 REPO = HERE.parent                              # MaaAuto-Installer/
 BUILD = HERE / "_build"
