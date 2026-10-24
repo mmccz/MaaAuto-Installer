@@ -84,6 +84,7 @@ class UpdateInfo:
     current: str = ""
     latest: str = ""
     tag: str = ""
+    channel: str = "stable"
     payload_url: str = ""
     payload_name: str = ""
     payload_size: int = 0
@@ -93,14 +94,50 @@ class UpdateInfo:
     error: str = ""
 
 
-def fetch_latest_release(api: str, timeout: int = 20) -> dict:
+def _request_json(url: str, timeout: int = 20):
     import urllib.request
     req = urllib.request.Request(
-        api,
+        url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_latest_release(api: str, timeout: int = 20) -> dict:
+    return _request_json(api, timeout)
+
+
+def _list_api(update_api: str) -> str:
+    """``.../releases/latest`` → ``.../releases``（beta 频道用）。"""
+    base = (update_api or "").rstrip("/")
+    if base.endswith("/latest"):
+        base = base[: -len("/latest")]
+    return base
+
+
+def fetch_release(api: str, channel: str = "stable", timeout: int = 20) -> dict:
+    """按频道取 Release。
+
+    stable：只取 ``releases/latest``（GitHub 不返回 prerelease）；
+    beta  ：取 ``releases`` 列表，忽略 draft，按版本号取最高（含 prerelease）。
+    """
+    if channel != "beta":
+        return fetch_latest_release(api, timeout)
+
+    releases = _request_json(_list_api(api), timeout)
+    if not isinstance(releases, list):
+        return {}
+    candidates = []
+    for rel in releases:
+        if not isinstance(rel, dict) or rel.get("draft"):
+            continue
+        version = parse_version(rel.get("tag_name", ""))
+        if version is not None:
+            candidates.append((version, rel))
+    if not candidates:
+        return {}
+    return max(candidates, key=lambda x: x[0])[1]
 
 
 def _sha_from_asset(asset: dict) -> str:
@@ -124,14 +161,19 @@ def check_update(manifest: Optional[Manifest],
                  update_api: str,
                  payload_prefix: str,
                  allow_downgrade: bool = False,
-                 log: Optional[Callable[[str], None]] = None) -> UpdateInfo:
+                 log: Optional[Callable[[str], None]] = None,
+                 channel: str = "stable") -> UpdateInfo:
     info = UpdateInfo()
     info.current = (manifest.version if manifest else "") or "0.0.0"
+    info.channel = channel
 
     try:
-        release = fetch_latest_release(update_api)
+        release = fetch_release(update_api, channel)
     except Exception as e:
         info.error = f"无法访问更新接口: {e}"
+        return info
+    if not release:
+        info.error = "没有找到可用的 Release"
         return info
 
     info.tag = release.get("tag_name", "") or ""

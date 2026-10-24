@@ -1,10 +1,9 @@
 """安装器与主程序 ``MaaAutoProject/app_info.py`` 的冻结契约。
 
 这里的值会写入安装目录的 ``.maaauto.json`` 的 ``extra``，升级器之后只读它。
-协议约定（2026-09 冻结，2026-10-24 随 3.0.0 payload 化复核）：
+协议约定（2026-10-24 统一为 1.0.0 基线）：
 
 * ``APP_UPDATE_API``            == ``extra.update_api``
-* ``APP_SOURCE_ASSET``          == ``extra.source_asset_name``（过渡期保留）
 * ``APP_MIN_INSTALLER_VERSION`` == ``extra.min_installer_version``
 * ``APP_PAYLOAD_ASSET_PREFIX``  == ``extra.payload_asset_prefix``
 
@@ -24,15 +23,13 @@ def default_manifest_extra() -> Dict[str, object]:
         "launch_args": [],
         "payload_asset_prefix": "MaaAuto_payload_v",
         "setup_asset_prefix": "MaaAuto_Setup_v",
-        "source_asset_name": "MaaAuto_Source.zip",
-        "min_installer_version": "3.0.0",
+        "min_installer_version": "1.0.0",
     }
 
 
 # extra 键 → app_info.py 常量名（构建期断言用）
 APP_INFO_CONSTANTS = {
     "update_api": "APP_UPDATE_API",
-    "source_asset_name": "APP_SOURCE_ASSET",
     "min_installer_version": "APP_MIN_INSTALLER_VERSION",
     "payload_asset_prefix": "APP_PAYLOAD_ASSET_PREFIX",
 }

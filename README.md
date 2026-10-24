@@ -6,7 +6,7 @@
 
 **MaaAuto 的打包与升级仓库** —— Inno Setup 安装包 + payload 升级器
 
-[![Version](https://img.shields.io/badge/version-3.0.0-2f81f7.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.0-2f81f7.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://github.com/mmccz/MaaAuto-Installer/releases)
 [![Main App](https://img.shields.io/badge/main%20app-MaaAuto--Tool--works-6f42c1.svg)](https://github.com/mmccz/MaaAuto-Tool-works)
@@ -31,10 +31,10 @@
 
 | 文件 | 大小 | 用途 |
 | --- | --- | --- |
-| `MaaAuto_Setup_v{ver}-Windows-x64.exe` | ~100 MB | 完整安装包，内嵌 payload，断网可装 |
+| `MaaAuto_Setup_v{ver}-Windows-x64.exe` | ~94 MB | 完整安装包，内嵌 payload，断网可装 |
 | `MaaAuto_Online_v{ver}-Windows-x64.exe` | ~2 MB | 在线引导包，安装时才下载完整包 |
 | `MaaAuto_payload_v{ver}.zip` | ~100 MB | 升级器下载的预构建程序包 |
-| `MaaAuto_Source.zip` | ~120 KB | 2.x 过渡期保留，供旧升级器重新编译 |
+| `SHA256SUMS.txt` | — | 上述三个文件的校验和 |
 
 ---
 
@@ -48,7 +48,7 @@
 | 需要 Python | **否** |
 | 安装耗时 | 约 30 秒 |
 | 快捷方式 | 开始菜单固定创建；桌面可选 |
-| 卸载 | Inno 生成的 `unins000.exe`（开始菜单也有「卸载 MaaAuto」入口）：删除文件/快捷方式/注册表/自启项，并询问是否保留 `config` 与 `logs`（静默卸载默认保留） |
+| 卸载 | Inno 生成的 `unins000.exe`（开始菜单也有「卸载 MaaAuto」入口）：先停主程序，再删文件/快捷方式/注册表/自启项；默认保留 `config` 与 `logs`，加 `/PURGEDATA` 彻底删除 |
 
 主程序 exe 内嵌 `requireAdministrator` 清单，**每次启动弹一次 UAC**（它需要点击游戏的提权窗口）；安装本身不再写 `RUNASADMIN` 兼容标志，安装时还会清理 2.x 留下的旧标志。
 
@@ -79,14 +79,15 @@ upgrade.exe：读 .maaauto.json → 重新查询 Release
 - 正在运行的 `upgrade.exe` 会被改名让位（`.old`），下次启动时清理，因此**升级器自身可以随 payload 更新**。
 - 用户取消、已是最新、检查失败等终态都会回到主程序（`--restart` 且主程序未运行时）。
 
-命令行（与 2.x 一致，主程序无需改动）：
+命令行（与旧版保持一致，主程序无需改动）：
 
 ```text
-upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui] [--downgrade]
+upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui] [--channel stable|beta] [--downgrade]
 ```
 
-- `--silent`：显示不可交互的进度窗（2.x 的既定语义）；
-- `--no-ui`：完全无窗口，只写日志，供自动化 / CI 使用。
+- `--silent`：显示不可交互的进度窗；
+- `--no-ui`：完全无窗口，只写日志，供自动化 / CI 使用；
+- `--channel beta`：同时接受预发布（`bN` / `rcN`），稳定版只看 `releases/latest`。
 
 退出码：`0` 成功/有新版本，`1` 仅 `--check-only` 且已最新，`2` 错误。
 
@@ -124,7 +125,7 @@ python build_release.py --source-dir ..\..\MaaAuto-Tool-works\MaaAutoProject
 
 ### CI
 
-`.github/workflows/release.yml`：推 `v*` tag 时在 `windows-latest` 上取主程序同 tag、装依赖与 Inno、跑 `build_release.py`、顺带生成 `MaaAuto_Source.zip`，最后把 4 个资产挂到 **草稿 Release**。
+`.github/workflows/release.yml` **位于主程序仓库**（Release 与 tag 都在那边）：推 `v*` tag 后检出本仓库、装依赖与 Inno、跑 `build_release.py`，把三个资产 + `SHA256SUMS.txt` 挂到草稿 Release；tag 含 `b` / `rc` 时自动标记为 prerelease。
 
 ---
 
@@ -184,8 +185,8 @@ MaaAuto-Installer/
 | --- | --- |
 | 未签名 | SmartScreen 会提示「未知发布者」；构建脚本预留了签名步骤，拿到证书后接入即可 |
 | 不做差分升级 | 每次升级下载全量 payload（约 100 MB）；文件级差分留待后续 |
-| 安装包变大 | 从 ~50 MB 变成 ~100 MB，换来免编译与可复现 |
-| 升级器版本门槛 | 3.0.0 起要求 `min_installer_version = 3.0.0`；2.x 用户先走一次 Source.zip 重编译 |
+| 安装包变大 | 从 ~50 MB 变成 ~94 MB，换来免编译与可复现 |
+| 升级器版本门槛 | `min_installer_version = 1.0.0`；低于它的旧安装包需要重装一次 |
 
 ---
 

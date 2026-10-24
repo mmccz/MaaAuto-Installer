@@ -2,7 +2,7 @@
 ; MaaAuto 完整安装包（Inno Setup 6.5+）
 ;
 ; 由 build_release.py 调用，通过 /D 传入：
-;   MyAppVersion / MyInstallerVersion / MyUpdateApi / MySourceAsset
+;   MyAppVersion / MyInstallerVersion / MyUpdateApi
 ;   MyPayloadPrefix / MyMinInstaller / MyPayloadDir / MyOutputDir
 ;   MyIcon / MySetupBase
 ;
@@ -17,9 +17,6 @@
 #endif
 #ifndef MyUpdateApi
   #define MyUpdateApi "https://api.github.com/repos/mmccz/MaaAuto-Tool-works/releases/latest"
-#endif
-#ifndef MySourceAsset
-  #define MySourceAsset "MaaAuto_Source.zip"
 #endif
 #ifndef MyPayloadPrefix
   #define MyPayloadPrefix "MaaAuto_payload_v"
@@ -87,7 +84,9 @@ Name: "{group}\{cm:UninstallProgram,MaaAuto}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\MaaAuto"; Filename: "{app}\MaaAuto.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\MaaAuto.exe"; Description: "{cm:LaunchProgram,MaaAuto}"; Flags: nowait postinstall skipifsilent
+; shellexec 必需：主程序 manifest 要求管理员，用 CreateProcess 直接起会报
+; 「错误代码 740，请求的操作需要提升」。ShellExecute 会走 UAC。
+Filename: "{app}\MaaAuto.exe"; Description: "{cm:LaunchProgram,MaaAuto}"; Flags: nowait postinstall skipifsilent shellexec
 
 [Code]
 procedure WriteManifest();
@@ -125,7 +124,6 @@ begin
     '    "release_channel": "stable",' + #13#10 +
     '    "launch_args": [],' + #13#10 +
     '    "payload_asset_prefix": "{#MyPayloadPrefix}",' + #13#10 +
-    '    "source_asset_name": "{#MySourceAsset}",' + #13#10 +
     '    "min_installer_version": "{#MyMinInstaller}"' + #13#10 +
     '  }' + #13#10 +
     '}';
@@ -161,15 +159,35 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
+  Purge: Boolean;
+  ResultCode: Integer;
+  I: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
     CleanLegacyRegistry();
-    { 必须用 SuppressibleMsgBox：普通 MsgBox 在 /SUPPRESSMSGBOXES 下仍会弹出，
-      静默卸载会永久卡住。默认为「是」= 保留用户数据。 }
-    if SuppressibleMsgBox('是否保留配置与日志？' + #13#10 +
-              '选择“是”将保留 config 与 logs 目录，重新安装后可继续使用。',
-              mbConfirmation, MB_YESNO, IDYES) = IDNO then
+
+    { 先把主程序停掉：它可能正在运行并占用 _internal 里的 DLL，
+      否则 Inno 删不掉文件，用户会看到「卸载没搞干净」。 }
+    Exec(ExpandConstant('{cmd}'),
+         '/c taskkill /F /IM MaaAuto.exe /T >nul 2>&1', '',
+         SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(800);
+
+    { /PURGEDATA 强制连用户数据一起删；否则询问，默认保留。
+      卸载器里没有 CmdLineParamExists，用 ParamStr 遍历。 }
+    Purge := False;
+    for I := 1 to ParamCount do
+      if CompareText(ParamStr(I), '/PURGEDATA') = 0 then
+        Purge := True;
+
+    if not Purge then
+      Purge := SuppressibleMsgBox(
+        '是否同时删除配置与日志？' + #13#10 +
+        '选择“否”将保留 config 与 logs 目录，重新安装后可继续使用。',
+        mbConfirmation, MB_YESNO, IDNO) = IDYES;
+
+    if Purge then
     begin
       DataDir := ExpandConstant('{app}\config');
       DelTree(DataDir, True, True, True);
@@ -177,5 +195,7 @@ begin
       DelTree(DataDir, True, True, True);
     end;
     DeleteFile(ExpandConstant('{app}\.maaauto.json'));
+    { 升级残留的 .old exe 与临时目录 }
+    DeleteFile(ExpandConstant('{app}\upgrade.exe.old'));
   end;
 end;

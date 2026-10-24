@@ -75,7 +75,7 @@ def find_iscc(explicit: str = "") -> Path:
 # --------------------------------------------------------------------------- #
 def read_app_info(source_dir: Path) -> dict:
     text = (source_dir / "app_info.py").read_text(encoding="utf-8")
-    keys = ["APP_VERSION", "APP_UPDATE_API", "APP_SOURCE_ASSET",
+    keys = ["APP_VERSION", "APP_UPDATE_API",
             "APP_MIN_INSTALLER_VERSION", "APP_PAYLOAD_ASSET_PREFIX"]
     out = {}
     for key in keys:
@@ -93,7 +93,7 @@ def check_contract(source_dir: Path) -> dict:
         problems.append("APP_VERSION 缺失，或不是行首字符串常量")
     elif not VERSION_RE.match(version):
         problems.append(f"APP_VERSION={version!r} 不符合 X.Y.Z[(a|b|rc)N][.postN]")
-    for key in ("APP_UPDATE_API", "APP_SOURCE_ASSET", "APP_MIN_INSTALLER_VERSION",
+    for key in ("APP_UPDATE_API", "APP_MIN_INSTALLER_VERSION",
                 "APP_PAYLOAD_ASSET_PREFIX"):
         if not info[key]:
             problems.append(f"{key} 缺失")
@@ -223,7 +223,6 @@ def compile_installer(version: str, info: dict, payload_dir: Path,
         f"/DMyAppVersion={version}",
         f"/DMyInstallerVersion={read_installer_version()}",
         f"/DMyUpdateApi={info['APP_UPDATE_API']}",
-        f"/DMySourceAsset={info['APP_SOURCE_ASSET']}",
         f"/DMyPayloadPrefix={info['APP_PAYLOAD_ASSET_PREFIX']}",
         f"/DMyMinInstaller={info['APP_MIN_INSTALLER_VERSION']}",
         f"/DMyPayloadDir={payload_dir}",

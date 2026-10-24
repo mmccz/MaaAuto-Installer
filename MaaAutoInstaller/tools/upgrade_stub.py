@@ -237,9 +237,12 @@ class UpgradeFlow:
             return None, 2
 
         self._stage("check")
+        channel = getattr(self.args, "channel", "stable") or "stable"
+        self.log.info(f"更新渠道: {channel}")
         info = check_update(self.manifest, api, prefix,
                             allow_downgrade=bool(self.args.downgrade),
-                            log=self.log.info)
+                            log=self.log.info,
+                            channel=channel)
         if info.error:
             self.log.error(f"检查更新失败: {info.error}")
             self._fail_reason = f"检查更新失败: {info.error}"
