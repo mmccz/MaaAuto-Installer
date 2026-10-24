@@ -160,7 +160,7 @@ python tools/build_stubs.py --only upgrade  # 只打升级器（含 PySide6，�
 
 ## 关键契约
 
-与主程序之间的协议见 [INTEGRATION.md](INTEGRATION.md)，逐条回复见 [docs/INSTALLER_RESPONSE.md](docs/INSTALLER_RESPONSE.md)。核心是三个握手文件：
+与主程序之间只通过三个文件握手，外加一组冻结常量。协议细节以代码与本节为准：
 
 | 文件 | 写入方 | 读取方 | 语义 |
 | --- | --- | --- | --- |
@@ -198,10 +198,8 @@ APP_MIN_INSTALLER_VERSION    ↔ extra.min_installer_version
 
 ```text
 MaaAuto-Installer/
-├─ INTEGRATION.md              ← 与主程序的契约
 ├─ CHANGELOG.md
 ├─ docs/
-│  ├─ INSTALLER_RESPONSE.md    ← 对契约的逐条回复
 │  └─ images/logo.png
 └─ MaaAutoInstaller/
    ├─ VERSION                  ← 安装器版本

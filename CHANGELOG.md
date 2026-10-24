@@ -28,7 +28,7 @@
 
 - README 完全重写为「安装器专属」，不再复用主程序说明。
 - 新增本文件。
-- `INTEGRATION.md`、`docs/INSTALLER_RESPONSE.md` 同步 Q2 口径与镜像修复。
+- 协议要点并入 README「关键契约」，不再维护单独的对接口文档。
 
 ---
 
