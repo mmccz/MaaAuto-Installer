@@ -12,11 +12,13 @@
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -63,11 +65,27 @@ def find_iscc(explicit: str = "") -> Path:
         if p.exists():
             return p
         raise FileNotFoundError(f"ISCC 不存在: {p}")
-    for p in ISCC_CANDIDATES:
+
+    # 候选路径（choco / winget / 手动安装的位置不一样）
+    candidates = list(ISCC_CANDIDATES)
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(Path(base) / "Inno Setup 6" / "ISCC.exe")
+            candidates.append(Path(base) / "Programs" / "Inno Setup 6" / "ISCC.exe")
+    which = shutil.which("ISCC") or shutil.which("iscc")
+    if which:
+        candidates.insert(0, Path(which))
+
+    for p in candidates:
         if p.exists():
+            log(f"使用 ISCC: {p}")
             return p
+
+    listed = "\n  ".join(str(p) for p in candidates)
     raise FileNotFoundError(
-        "找不到 ISCC.exe（Inno Setup）。请安装 Inno Setup 6 或传 --iscc 指定路径。")
+        "找不到 ISCC.exe（Inno Setup）。已尝试：\n  "
+        f"{listed}\n请安装 Inno Setup 6（choco install innosetup）或传 --iscc。")
 
 
 # --------------------------------------------------------------------------- #
@@ -293,6 +311,7 @@ def main() -> int:
         info = check_contract(source_dir)
     except Exception as e:
         err(str(e))
+        traceback.print_exc()
         return 1
 
     version = info["APP_VERSION"]
@@ -301,6 +320,7 @@ def main() -> int:
         iscc = find_iscc(args.iscc)
     except Exception as e:
         err(str(e))
+        traceback.print_exc()
         return 1
 
     DIST.mkdir(parents=True, exist_ok=True)
@@ -359,6 +379,7 @@ def main() -> int:
 
     except Exception as e:
         err(str(e))
+        traceback.print_exc()
         return 1
 
 
