@@ -6,7 +6,7 @@
 
 **MaaAuto 的打包与升级仓库** —— Inno Setup 安装包 + payload 升级器
 
-[![Version](https://img.shields.io/badge/version-1.1.1-2f81f7.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.4.1-2f81f7.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://github.com/mmccz/MaaAuto-Installer/releases)
 [![Main App](https://img.shields.io/badge/main%20app-MaaAuto--Tool--works-6f42c1.svg)](https://github.com/mmccz/MaaAuto-Tool-works)
