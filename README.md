@@ -6,7 +6,7 @@
 
 **MaaAuto 的打包与升级仓库** —— Inno Setup 安装包 + payload 升级器
 
-[![Version](https://img.shields.io/badge/version-1.1.0-2f81f7.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.1-2f81f7.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://github.com/mmccz/MaaAuto-Installer/releases)
 [![Main App](https://img.shields.io/badge/main%20app-MaaAuto--Tool--works-6f42c1.svg)](https://github.com/mmccz/MaaAuto-Tool-works)
@@ -169,15 +169,23 @@ $app = "$env:LOCALAPPDATA\Programs\MaaAuto"
 
 ```powershell
 # 安装包 E2E：静默安装 → 内容校验 → 假 Release 升级 → 卸载（发版前本机跑）
-python tools\verify_release.py 1.1.0
+python tools\verify_release.py 1.1.1
+
+# 发布前 smoke：静默安装 → 查产物/manifest → 卸干净（CI 每版必跑，也可本机跑）
+python tools\smoke_install.py 1.1.1
 
 # 发布后元数据：Release/digest/公告源（不下载大文件，发版后跑）
-python tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.1.0
+python tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.1.1
 ```
 
 ### CI
 
 `.github/workflows/release.yml` **位于主程序仓库**（Release 与 tag 都在那边）：推 `v*` tag 后检出本仓库、装依赖与 Inno、跑 `build_release.py`，把 4 个资产（Setup / Online / payload / SHA256SUMS）挂到 Release；正文取主程序仓库的 `RELEASE_NOTES.md`，构建成功**直接发布**（`draft: false`），tag 含 `b` / `rc` 时自动标记为 prerelease。发布后建议跑一遍 `tools\verify_release_meta.py` 复核。
+
+发布前还有一道 **安装/卸载 smoke**（`tools\smoke_install.py`）：在干净 runner 上真的静默安装 → 校验
+`MaaAuto.exe` / `upgrade.exe` / `.maaauto.json`（版本与 `contract.py` 契约）→ 静默卸载并确认目录清空。
+任一项失败则构建红在「发布 Release」之前，不会把装不上的版本发出去；失败日志（`build.log` +
+`smoke.log`）会推到 `ci-logs` 分支的 `ci-last.log`。
 
 ---
 
