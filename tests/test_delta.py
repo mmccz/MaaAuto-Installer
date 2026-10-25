@@ -191,3 +191,96 @@ def test_check_update_without_delta_still_works(monkeypatch):
     info = payload.check_update(M(), "http://x", "MaaAuto_payload_v")
     assert info.has_update
     assert info.delta_url == ""
+
+
+# --------------------------------------------------------------------------- #
+# 跳版本：串行差分链
+# --------------------------------------------------------------------------- #
+def _asset(name, size=100):
+    return {"name": name, "browser_download_url": "http://x/" + name,
+            "size": size, "digest": "sha256:" + "a" * 64}
+
+
+def test_collect_delta_edges_from_releases():
+    releases = [
+        {"tag_name": "v1.4.0", "assets": [
+            _asset("MaaAuto_payload_v1.4.0.zip"),
+            _asset("MaaAuto_delta_v1.3.0_to_1.4.0.zip")]},
+        {"tag_name": "v1.3.0", "assets": [
+            _asset("MaaAuto_delta_v1.2.0_to_1.3.0.zip")]},
+        {"tag_name": "v1.2.0", "draft": True, "assets": [
+            _asset("MaaAuto_delta_v1.1.0_to_1.2.0.zip")]},   # draft 要忽略
+    ]
+    edges = payload.collect_delta_edges(releases)
+    assert "1.2.0" in edges and "1.3.0" in edges["1.2.0"]
+    assert "1.3.0" in edges and "1.4.0" in edges["1.3.0"]
+    assert "1.1.0" not in edges          # draft 不算
+
+
+def test_find_delta_chain_multi_hop():
+    edges = {
+        "1.2.0": {"1.3.0": _asset("MaaAuto_delta_v1.2.0_to_1.3.0.zip")},
+        "1.3.0": {"1.4.0": _asset("MaaAuto_delta_v1.3.0_to_1.4.0.zip")},
+    }
+    chain = payload.find_delta_chain(edges, "1.2.0", "1.4.0")
+    assert [a["name"] for a in chain] == [
+        "MaaAuto_delta_v1.2.0_to_1.3.0.zip",
+        "MaaAuto_delta_v1.3.0_to_1.4.0.zip"]
+
+
+def test_find_delta_chain_no_path_or_too_many_hops():
+    edges = {"1.0.0": {"1.1.0": _asset("MaaAuto_delta_v1.0.0_to_1.1.0.zip")}}
+    assert payload.find_delta_chain(edges, "1.0.0", "1.4.0") == []
+    assert payload.find_delta_chain(edges, "1.4.0", "1.0.0") == []
+    assert payload.find_delta_chain(edges, "1.1.0", "1.1.0") == []
+
+
+def test_apply_delta_chain_two_steps(tmp_path):
+    """装的是 A，链式打 A→B、B→C，结果必须与 C 完全一致。"""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    c = tmp_path / "c"
+    _write(a / "MaaAuto.exe", b"A" * 20000)
+    _write(a / "keep.dll", b"K" * 1000)
+    _write(b / "MaaAuto.exe", b"A" * 19000 + b"B" * 1000)
+    _write(b / "keep.dll", b"K" * 1000)
+    _write(b / "_internal/mid.dll", b"M" * 500)
+    _write(c / "MaaAuto.exe", b"A" * 18000 + b"B" * 1000 + b"C" * 1000)
+    _write(c / "keep.dll", b"K" * 1000)
+    _write(c / "_internal/mid.dll", b"M" * 500)
+    _write(c / "_internal/new.dll", b"N" * 400)
+
+    d_ab = tmp_path / "ab.zip"
+    d_bc = tmp_path / "bc.zip"
+    delta.build_delta(b, a, d_ab, "1.3.0", "1.2.0")
+    delta.build_delta(c, b, d_bc, "1.4.0", "1.3.0")
+
+    install = tmp_path / "app"
+    for src in a.rglob("*"):
+        if src.is_file():
+            _write(install / src.relative_to(a), src.read_bytes())
+    _write(install / "config" / "config.json", b'{"keep": true}')
+
+    result = payload.apply_delta_chain(install, [d_ab, d_bc])
+    assert result.success and result.via_delta
+
+    for rel in ("MaaAuto.exe", "keep.dll", "_internal/mid.dll", "_internal/new.dll"):
+        assert (install / rel).read_bytes() == (c / rel).read_bytes(), rel
+    assert (install / "config" / "config.json").exists()
+
+
+def test_apply_delta_chain_reports_mismatch_without_touching_install(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _write(a / "MaaAuto.exe", b"A" * 5000)
+    _write(b / "MaaAuto.exe", b"B" * 5000)
+    d_ab = tmp_path / "ab.zip"
+    delta.build_delta(b, a, d_ab, "1.3.0", "1.2.0")
+
+    install = tmp_path / "app"
+    _write(install / "MaaAuto.exe", b"tampered")
+
+    result = payload.apply_delta_chain(install, [d_ab])
+    assert not result.success and result.base_mismatch
+    # 安装目录一个字节都不能被改
+    assert (install / "MaaAuto.exe").read_bytes() == b"tampered"

@@ -46,7 +46,7 @@ from installer.core import (
     check_update, compare_versions, sha256_of_file, download_file,
     is_main_running, request_main_exit,
     clear_upgrading_flag, write_failure_flag,
-    apply_payload, apply_delta, restart_main,
+    apply_payload, apply_delta, apply_delta_chain, restart_main,
     cleanup_old_exe, cleanup_backups,
     DEFAULT_MIN_INSTALLER_VERSION,
 )
@@ -299,7 +299,7 @@ class UpgradeFlow:
 
         # 0) 优先差分：只下载变化部分（实测 61 MB → 0.6 MB）。
         #    任何失败（基准不符、补丁损坏、网络中断）都静默回退整包。
-        if info.delta_url:
+        if info.delta_url or getattr(info, 'delta_chain', None):
             old_version = self.manifest.version
             try:
                 code = self._try_delta(info)
@@ -378,26 +378,44 @@ class UpgradeFlow:
         # 5) 收尾
         return self._finish(info, old_version, actual)
 
-    # ---- 差分尝试 ----
+    # ---- 差分尝试（单个或串行链） ----
     def _try_delta(self, info) -> Optional[int]:
-        """尝试差分升级。
+        """尝试差分升级：一个包或「多步串行」。
 
+        跳版本（如 1.2.0 → 1.4.0）时没有直达差分包，但可以按
+        1.2.0 → 1.3.0 → 1.4.0 逐级打补丁。
         :return: 成功返回退出码 0；不适用（基准不符等）返回 ``None`` 让调用方回退整包。
         """
+        chain = list(getattr(info, "delta_chain", None) or [])
+        if not chain:
+            chain = [{"name": info.delta_name, "browser_download_url": info.delta_url,
+                      "size": info.delta_size, "digest": f"sha256:{info.delta_sha}"}]
+
         work = Path(tempfile.gettempdir()) / f"MaaAuto_delta_dl_{int(time.time())}"
         work.mkdir(parents=True, exist_ok=True)
-        delta_file = work / info.delta_name
         try:
+            total_mb = sum(int(a.get("size") or 0) for a in chain) / 1048576
             self._stage("download")
-            self._msg(f"下载差分更新（{info.delta_size / 1048576:.2f} MB）...", "info")
-            download_file(info.delta_url, delta_file, log=self.log.info,
-                          progress=self._progress)
+            self._msg(f"下载差分更新（{len(chain)} 步，共 {total_mb:.2f} MB）...", "info")
+
+            files = []
+            for idx, asset in enumerate(chain, 1):
+                name = asset.get("name") or f"delta_{idx}.zip"
+                dest = work / name
+                download_file(asset.get("browser_download_url", ""), dest,
+                              log=self.log.info, progress=self._progress)
+                files.append(dest)
 
             self._stage("verify")
-            actual = sha256_of_file(delta_file)
-            expected = (info.delta_sha or "").lower()
-            if expected and actual != expected:
-                raise RuntimeError(f"差分校验失败：期望 {expected[:12]}…，实际 {actual[:12]}…")
+            for asset, path in zip(chain, files):
+                digest = (asset.get("digest") or "").lower()
+                if digest.startswith("sha256:"):
+                    expected = digest.split(":", 1)[1].strip()
+                    actual = sha256_of_file(path)
+                    if actual != expected:
+                        raise RuntimeError(
+                            f"差分校验失败 {path.name}：期望 {expected[:12]}…，"
+                            f"实际 {actual[:12]}…")
 
             self._stage("stop_main")
             if not request_main_exit(self.install_dir, log=self.log.info):
@@ -405,17 +423,22 @@ class UpgradeFlow:
 
             self._stage("apply")
             old_version = self.manifest.version
-            result = apply_delta(self.install_dir, delta_file, log=self.log.info,
-                                 progress=self._progress, cancel_check=self._cancelled)
+            if len(files) == 1:
+                result = apply_delta(self.install_dir, files[0], log=self.log.info,
+                                     progress=self._progress, cancel_check=self._cancelled)
+            else:
+                result = apply_delta_chain(self.install_dir, files,
+                                           log=self.log.info, progress=self._progress,
+                                           cancel_check=self._cancelled)
             if result.base_mismatch:
-                # 不是同一份安装（用户手动替换过文件），整包才靠谱
                 self.log.info("本地文件与差分基准不符，改走整包")
                 return None
             if not result.success:
                 raise RuntimeError(result.error or "差分应用失败")
 
-            self.log.info(f"差分应用成功（{result.replaced} 个文件）")
-            return self._finish(info, old_version, actual)
+            self.log.info(f"差分应用成功（{result.replaced} 个文件，"
+                          f"{len(files)} 步）")
+            return self._finish(info, old_version, sha256_of_file(files[-1]))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 

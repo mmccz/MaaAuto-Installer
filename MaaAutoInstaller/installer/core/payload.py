@@ -18,9 +18,9 @@ import sys
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from installer.core import delta as delta_mod
 from installer.core.downloader import download_file, DownloadError
@@ -102,6 +102,8 @@ class UpdateInfo:
     delta_name: str = ""
     delta_size: int = 0
     delta_sha: str = ""
+    # 跳版本时的串行差分：按顺序依次应用（每项是 GitHub 资产 dict）
+    delta_chain: list = field(default_factory=list)
     notes: str = ""
     html_url: str = ""
     error: str = ""
@@ -181,6 +183,63 @@ def pick_delta_asset(release: dict, current: str, latest: str) -> Optional[dict]
     return None
 
 
+def fetch_releases(api: str, timeout: int = 20, per_page: int = 60) -> list:
+    """取 Release 列表（含旧版本），用于找「跳版本」的串行差分链。"""
+    url = f"{_list_api(api)}?per_page={int(per_page)}"
+    try:
+        data = _request_json(url, timeout)
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def collect_delta_edges(releases) -> Dict[str, Dict[str, dict]]:
+    """从所有 Release 的资产里收集 ``{from_version: {to_version: asset}}``。
+
+    资产名规则：``{DELTA_ASSET_PREFIX}{from}_to_{to}.zip``。
+    """
+    edges: Dict[str, Dict[str, dict]] = {}
+    prefix = DELTA_ASSET_PREFIX.lower()
+    for rel in releases or []:
+        if not isinstance(rel, dict) or rel.get("draft"):
+            continue
+        for asset in rel.get("assets") or []:
+            name = (asset.get("name") or "").lower()
+            if not (name.startswith(prefix) and name.endswith(".zip")):
+                continue
+            middle = name[len(prefix):-len(".zip")]
+            if "_to_" not in middle:
+                continue
+            source, target = middle.split("_to_", 1)
+            if parse_version(source) is None or parse_version(target) is None:
+                continue
+            edges.setdefault(source, {})[target] = asset
+    return edges
+
+
+def find_delta_chain(edges: Dict[str, Dict[str, dict]],
+                     current: str, target: str,
+                     max_hops: int = 4) -> list:
+    """在差分图里找 ``current → target`` 的最短链（BFS）。找不到返回 ``[]``。"""
+    if not current or current == target:
+        return []
+    queue = [(current, [])]
+    seen = {current}
+    while queue:
+        node, path = queue.pop(0)
+        if len(path) >= max_hops:
+            continue
+        for nxt, asset in (edges.get(node) or {}).items():
+            if nxt in seen:
+                continue
+            new_path = path + [asset]
+            if nxt == target:
+                return new_path
+            seen.add(nxt)
+            queue.append((nxt, new_path))
+    return []
+
+
 def check_update(manifest: Optional[Manifest],
                  update_api: str,
                  payload_prefix: str,
@@ -241,6 +300,22 @@ def check_update(manifest: Optional[Manifest],
         info.delta_url = delta_asset.get("browser_download_url", "")
         info.delta_size = int(delta_asset.get("size") or 0)
         info.delta_sha = _sha_from_asset(delta_asset)
+        info.delta_chain = [delta_asset]
+    else:
+        # 没有「上一版→本版」的直接差分：找串行链（1.2.0 → 1.3.0 → 1.4.0）
+        chain = find_delta_chain(
+            collect_delta_edges(fetch_releases(update_api)),
+            info.current, latest)
+        if chain:
+            info.delta_chain = chain
+            info.delta_name = chain[0].get("name", "")
+            info.delta_url = chain[0].get("browser_download_url", "")
+            info.delta_size = sum(int(a.get("size") or 0) for a in chain)
+            info.delta_sha = _sha_from_asset(chain[0])
+            if log:
+                log("跳版本升级：可用串行差分 " + " → ".join(
+                    [info.current] + [a.get("name", "")[len(DELTA_ASSET_PREFIX):-4]
+                                      .split("_to_")[-1] for a in chain]))
 
     if log:
         via = f"，差分 {info.delta_size / 1048576:.1f} MB" if info.delta_url else ""
@@ -640,6 +715,73 @@ def apply_delta(install_dir: Path,
 # --------------------------------------------------------------------------- #
 # 重启
 # --------------------------------------------------------------------------- #
+def apply_delta_chain(install_dir: Path,
+                      delta_zips: list,
+                      log: Optional[Callable[[str], None]] = None,
+                      progress: Optional[Callable[[int, int], None]] = None,
+                      cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
+    """依次应用多个差分包（跳版本升级，如 1.2.0 → 1.3.0 → 1.4.0）。
+
+    做法：先把安装目录复制成一份「工作副本」，在副本上逐级打补丁
+    （每级都以副本当前内容为基准），全部成功后再一次性覆盖安装目录。
+    好处是**整个链只有一次提交/回滚**：中间任何一步失败，安装目录都没被动过。
+    """
+    install_dir = Path(install_dir).resolve()
+    parent = install_dir.parent
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    new_dir = parent / f".MaaAuto_new_chain_{stamp}"
+    bak_dir = parent / f".MaaAuto_bak_chain_{stamp}"
+
+    def _log(msg):
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    if cancel_check and cancel_check():
+        return ApplyResult(success=False, error="用户取消")
+    if not delta_zips:
+        return ApplyResult(success=False, error="没有可用的差分包")
+
+    try:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        _log(f"准备链式升级（共 {len(delta_zips)} 步）...")
+        ignore = shutil.ignore_patterns(*(list(PROTECTED_TOP) + ["unins*", ".MaaAuto_*"]))
+        shutil.copytree(install_dir, new_dir, ignore=ignore)
+
+        for idx, zip_path in enumerate(delta_zips, 1):
+            if cancel_check and cancel_check():
+                raise RuntimeError("用户取消")
+            _log(f"应用第 {idx}/{len(delta_zips)} 个差分包: {Path(zip_path).name}")
+            count, deletes = delta_mod.materialize(
+                zip_path, new_dir, new_dir, log=log,
+                progress=progress, cancel_check=cancel_check)
+            for rel_name in deletes:
+                target = new_dir / rel_name
+                try:
+                    if target.is_file():
+                        target.unlink()
+                except OSError:
+                    pass
+            _log(f"  第 {idx} 步完成：{count} 个文件")
+
+        if not (new_dir / MAIN_EXE_NAME).exists():
+            raise ValueError("链式升级结果缺少 MaaAuto.exe")
+    except delta_mod.BaseMismatch as e:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        _log(f"链式差分基准不符，将回退整包: {e}")
+        return ApplyResult(success=False, base_mismatch=True,
+                           error=f"基准版本不一致: {e}")
+    except Exception as e:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return ApplyResult(success=False, error=f"链式升级失败: {e}")
+
+    return _commit_tree(new_dir, bak_dir, install_dir, [], _log,
+                        progress=progress, cancel_check=cancel_check,
+                        via_delta=True)
+
+
 def read_launch_args(install_dir: Path) -> List[str]:
     path = Path(install_dir) / "config" / "last_launch_args.json"
     try:
