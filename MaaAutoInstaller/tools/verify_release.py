@@ -86,19 +86,23 @@ def wait_gone(path: Path, timeout=120):
 setup = DIST / f"MaaAuto_Setup_v{VERSION}-Windows-x64.exe"
 online = DIST / f"MaaAuto_Online_v{VERSION}-Windows-x64.exe"
 payload = DIST / f"MaaAuto_payload_v{VERSION}.zip"
+deltas = sorted(DIST.glob(f"MaaAuto_delta_v*_to_{VERSION}.zip"))
+delta = deltas[0] if deltas else None
 sums = DIST / "SHA256SUMS.txt"
 
 print("=" * 72)
 print(f"[0] 产物检查（{VERSION}）")
 for p in (setup, online, payload, sums):
     check(f"存在 {p.name}", p.exists(), str(p))
+if delta is not None:
+    check(f"存在 {delta.name}", delta.exists(), str(delta))
 if sums.exists():
     listed = {}
     for line in sums.read_text(encoding="utf-8").splitlines():
         if line.strip():
             digest, name = line.split()
             listed[name] = digest
-    for p in (setup, online, payload):
+    for p in [setup, online, payload] + ([delta] if delta else []):
         if p.exists():
             check(f"SHA256 匹配 {p.name}", listed.get(p.name) == sha(p))
 
@@ -207,7 +211,8 @@ manifest_path.write_text(json.dumps(m, ensure_ascii=False, indent=2),
 server = subprocess.Popen(
     [sys.executable, str(HERE / "fake_release_server.py"),
      "--payload", str(payload), "--version", VERSION, "--port", "8775",
-     "--patch-manifest", str(APP_DIR)],
+     "--patch-manifest", str(APP_DIR)]
+    + (["--delta", str(delta)] if delta else []),
     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     encoding="utf-8", errors="replace")
 try:
@@ -229,6 +234,8 @@ try:
     check("check-only 发现新版本", r.returncode == 0,
           f"{r.returncode}: {(r.stdout or '')[-300:]}")
 
+    if delta is not None:
+        print(f"  已挂差分资产 {delta.name}（基准 1.0.0 → 无补丁，应自动回退整包）")
     r = run([upg, "--from-main", "--no-ui"], timeout=600,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace")

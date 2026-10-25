@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from installer.core import delta as delta_mod
 from installer.core.downloader import download_file, DownloadError
 from installer.core.manifest import (Manifest, read_manifest, write_manifest,
                                      MANIFEST_NAME)
@@ -47,6 +48,10 @@ DEFAULT_EXIT_TIMEOUT = 15.0
 # 之前写的是 3.0.0 —— 版本号重置后 1.x 的升级器永远「过旧」，老用户会被卡住。
 DEFAULT_MIN_INSTALLER_VERSION = "1.0.0"
 USER_AGENT = "MaaAutoUpgradeStub/3.0"
+
+# 差分资产命名：``MaaAuto_delta_v{from}_to_{to}.zip``
+# 与主程序 app_info.APP_DELTA_ASSET_PREFIX 保持一致（跨仓库契约，改了两边一起发版）。
+DELTA_ASSET_PREFIX = "MaaAuto_delta_v"
 
 _OLD_SUFFIX = ".old"
 
@@ -92,6 +97,11 @@ class UpdateInfo:
     payload_name: str = ""
     payload_size: int = 0
     payload_sha: str = ""
+    # 差分更新（Release 里有对应资产才用；失败自动回退整包）
+    delta_url: str = ""
+    delta_name: str = ""
+    delta_size: int = 0
+    delta_sha: str = ""
     notes: str = ""
     html_url: str = ""
     error: str = ""
@@ -160,6 +170,17 @@ def pick_payload_asset(release: dict, version: str,
     return None
 
 
+def pick_delta_asset(release: dict, current: str, latest: str) -> Optional[dict]:
+    """找 ``MaaAuto_delta_v{current}_to_{latest}.zip``；没有就返回 None。"""
+    if not current or parse_version(current) is None:
+        return None
+    want = f"{DELTA_ASSET_PREFIX}{current}_to_{latest}.zip".lower()
+    for asset in release.get("assets") or []:
+        if (asset.get("name") or "").lower() == want:
+            return asset
+    return None
+
+
 def check_update(manifest: Optional[Manifest],
                  update_api: str,
                  payload_prefix: str,
@@ -212,8 +233,19 @@ def check_update(manifest: Optional[Manifest],
     info.payload_url = asset.get("browser_download_url", "")
     info.payload_size = int(asset.get("size") or 0)
     info.payload_sha = _sha_from_asset(asset)
+
+    # 差分资产可选：只有「当前版本正好是某个 base」时才有，没有就整包
+    delta_asset = pick_delta_asset(release, info.current, latest)
+    if delta_asset:
+        info.delta_name = delta_asset.get("name", "")
+        info.delta_url = delta_asset.get("browser_download_url", "")
+        info.delta_size = int(delta_asset.get("size") or 0)
+        info.delta_sha = _sha_from_asset(delta_asset)
+
     if log:
-        log(f"发现新版本 {info.current} → {latest}，payload {info.payload_size / 1048576:.1f} MB")
+        via = f"，差分 {info.delta_size / 1048576:.1f} MB" if info.delta_url else ""
+        log(f"发现新版本 {info.current} → {latest}，"
+            f"payload {info.payload_size / 1048576:.1f} MB{via}")
     return info
 
 
@@ -348,6 +380,10 @@ class ApplyResult:
     rolled_back: bool = False
     replaced: int = 0
     error: str = ""
+    # 差分专用：本地文件与补丁基准不符（不是同一份安装）→ 调用方应回退整包
+    base_mismatch: bool = False
+    # 这次是走差分还是整包
+    via_delta: bool = False
 
 
 def _is_protected(rel: Path) -> bool:
@@ -415,44 +451,16 @@ def cleanup_backups(install_dir: Path) -> None:
             shutil.rmtree(p, ignore_errors=True)
 
 
-def apply_payload(install_dir: Path,
-                  payload_zip: Path,
-                  log: Optional[Callable[[str], None]] = None,
-                  progress: Optional[Callable[[int, int], None]] = None,
-                  cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
-    """解压 payload 并替换安装目录内的文件；失败自动回滚。"""
-    install_dir = Path(install_dir).resolve()
-    parent = install_dir.parent
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    new_dir = parent / f".MaaAuto_new_{stamp}"
-    bak_dir = parent / f".MaaAuto_bak_{stamp}"
+def _commit_tree(new_dir: Path, bak_dir: Path, install_dir: Path,
+                 delete_rels: List[str], _log,
+                 progress: Optional[Callable[[int, int], None]] = None,
+                 cancel_check: Optional[Callable[[], bool]] = None,
+                 via_delta: bool = False) -> ApplyResult:
+    """把准备好的 ``new_dir`` 覆盖到安装目录；失败按相反顺序回滚。
 
-    def _log(msg):
-        if log:
-            try:
-                log(msg)
-            except Exception:
-                pass
-
-    if cancel_check and cancel_check():
-        return ApplyResult(success=False, error="用户取消")
-
-    # 1) 解压
-    try:
-        shutil.rmtree(new_dir, ignore_errors=True)
-        new_dir.mkdir(parents=True, exist_ok=True)
-        _log(f"解压 payload → {new_dir.name}")
-        total = _safe_extract(payload_zip, new_dir)
-        if not (new_dir / MAIN_EXE_NAME).exists():
-            raise ValueError("payload 内缺少 MaaAuto.exe")
-        _log(f"payload 解压完成：{total} 个文件")
-        if progress:
-            progress(1, 3)
-    except Exception as e:
-        shutil.rmtree(new_dir, ignore_errors=True)
-        return ApplyResult(success=False, error=f"解压失败: {e}")
-
-    # 2) 备份 + 替换
+    整包与差分共用这一层：差分只是「new_dir 里只有变更文件，外加一个删除清单」。
+    每个被替换/删除的文件都会先备份到 ``bak_dir``，所以回滚能把两边都还原。
+    """
     moved_in: List[Path] = []
     backed_up: List[Tuple[Path, Path]] = []
     old_exe: Optional[Path] = None
@@ -486,12 +494,26 @@ def apply_payload(install_dir: Path,
             if progress and idx % 200 == 0:
                 progress(1 + idx / max(1, len(files)), 3)
 
+        # 差分包可能带「上一版有、这一版删掉」的文件（如改名的 DLL）
+        for rel_name in delete_rels or []:
+            rel = Path(rel_name)
+            if _is_protected(rel):
+                continue
+            dst = install_dir / rel
+            if not dst.is_file():
+                continue
+            bak = bak_dir / rel
+            bak.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(dst, bak)
+            backed_up.append((dst, bak))
+            _log(f"删除旧文件: {rel.as_posix()}")
+
         if progress:
             progress(2, 3)
         shutil.rmtree(new_dir, ignore_errors=True)
         shutil.rmtree(bak_dir, ignore_errors=True)
         _log("替换完成")
-        return ApplyResult(success=True, replaced=len(moved_in))
+        return ApplyResult(success=True, replaced=len(moved_in), via_delta=via_delta)
 
     except Exception as e:
         _log(f"替换失败，开始回滚: {e}")
@@ -502,7 +524,7 @@ def apply_payload(install_dir: Path,
                     dst.unlink()
             except Exception:
                 pass
-        # 再把备份放回去
+        # 再把备份放回去（含被删除的旧文件）
         for dst, bak in reversed(backed_up):
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -519,7 +541,100 @@ def apply_payload(install_dir: Path,
                 pass
         shutil.rmtree(new_dir, ignore_errors=True)
         shutil.rmtree(bak_dir, ignore_errors=True)
-        return ApplyResult(success=False, rolled_back=True, error=str(e))
+        return ApplyResult(success=False, rolled_back=True, error=str(e),
+                           via_delta=via_delta)
+
+
+def apply_payload(install_dir: Path,
+                  payload_zip: Path,
+                  log: Optional[Callable[[str], None]] = None,
+                  progress: Optional[Callable[[int, int], None]] = None,
+                  cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
+    """解压整包 payload 并替换安装目录内的文件；失败自动回滚。"""
+    install_dir = Path(install_dir).resolve()
+    parent = install_dir.parent
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    new_dir = parent / f".MaaAuto_new_{stamp}"
+    bak_dir = parent / f".MaaAuto_bak_{stamp}"
+
+    def _log(msg):
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    if cancel_check and cancel_check():
+        return ApplyResult(success=False, error="用户取消")
+
+    # 1) 解压
+    try:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        new_dir.mkdir(parents=True, exist_ok=True)
+        _log(f"解压 payload → {new_dir.name}")
+        total = _safe_extract(payload_zip, new_dir)
+        if not (new_dir / MAIN_EXE_NAME).exists():
+            raise ValueError("payload 内缺少 MaaAuto.exe")
+        _log(f"payload 解压完成：{total} 个文件")
+        if progress:
+            progress(1, 3)
+    except Exception as e:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return ApplyResult(success=False, error=f"解压失败: {e}")
+
+    # 2) 备份 + 替换
+    return _commit_tree(new_dir, bak_dir, install_dir, [], _log,
+                        progress=progress, cancel_check=cancel_check)
+
+
+def apply_delta(install_dir: Path,
+                delta_zip: Path,
+                log: Optional[Callable[[str], None]] = None,
+                progress: Optional[Callable[[int, int], None]] = None,
+                cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
+    """用差分包更新安装目录。
+
+    ``result.base_mismatch=True`` 表示本地文件与补丁基准不符（不是同一份安装），
+    调用方应改下整包，而不是报错给用户。
+    """
+    install_dir = Path(install_dir).resolve()
+    parent = install_dir.parent
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    new_dir = parent / f".MaaAuto_new_{stamp}"
+    bak_dir = parent / f".MaaAuto_bak_{stamp}"
+
+    def _log(msg):
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    if cancel_check and cancel_check():
+        return ApplyResult(success=False, error="用户取消")
+
+    try:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        new_dir.mkdir(parents=True, exist_ok=True)
+        _log("还原差分包 ...")
+        count, deletes = delta_mod.materialize(
+            delta_zip, install_dir, new_dir, log=log,
+            progress=progress, cancel_check=cancel_check)
+        if not (new_dir / MAIN_EXE_NAME).exists():
+            raise ValueError("差分包内缺少 MaaAuto.exe")
+        _log(f"差分包还原完成：{count} 个文件，待删除 {len(deletes)} 个")
+    except delta_mod.BaseMismatch as e:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        _log(f"差分包不适用，将回退整包: {e}")
+        return ApplyResult(success=False, base_mismatch=True,
+                           error=f"基准版本不一致: {e}")
+    except Exception as e:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return ApplyResult(success=False, error=f"还原失败: {e}")
+
+    return _commit_tree(new_dir, bak_dir, install_dir, deletes, _log,
+                        progress=progress, cancel_check=cancel_check,
+                        via_delta=True)
 
 
 # --------------------------------------------------------------------------- #

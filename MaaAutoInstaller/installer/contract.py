@@ -6,6 +6,7 @@
 * ``APP_UPDATE_API``            == ``extra.update_api``
 * ``APP_MIN_INSTALLER_VERSION`` == ``extra.min_installer_version``
 * ``APP_PAYLOAD_ASSET_PREFIX``  == ``extra.payload_asset_prefix``
+* ``APP_DELTA_ASSET_PREFIX``    == ``extra.delta_asset_prefix``（差分资产命名）
 
 修改任一值等于协议变更，必须双方同时发版；构建期由
 ``build_release.py::check_app_info_contract()`` 做强校验。
@@ -22,6 +23,7 @@ def default_manifest_extra() -> Dict[str, object]:
         "release_channel": "stable",
         "launch_args": [],
         "payload_asset_prefix": "MaaAuto_payload_v",
+        "delta_asset_prefix": "MaaAuto_delta_v",
         "setup_asset_prefix": "MaaAuto_Setup_v",
         "min_installer_version": "1.0.0",
     }
@@ -32,4 +34,5 @@ APP_INFO_CONSTANTS = {
     "update_api": "APP_UPDATE_API",
     "min_installer_version": "APP_MIN_INSTALLER_VERSION",
     "payload_asset_prefix": "APP_PAYLOAD_ASSET_PREFIX",
+    "delta_asset_prefix": "APP_DELTA_ASSET_PREFIX",
 }

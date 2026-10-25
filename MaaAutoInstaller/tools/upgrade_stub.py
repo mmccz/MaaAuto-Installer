@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import time
+from typing import Optional
 import traceback
 from pathlib import Path
 
@@ -45,7 +46,7 @@ from installer.core import (
     check_update, compare_versions, sha256_of_file, download_file,
     is_main_running, request_main_exit,
     clear_upgrading_flag, write_failure_flag,
-    apply_payload, restart_main,
+    apply_payload, apply_delta, restart_main,
     cleanup_old_exe, cleanup_backups,
     DEFAULT_MIN_INSTALLER_VERSION,
 )
@@ -296,6 +297,18 @@ class UpgradeFlow:
             self._restart_if_needed("用户取消")
             return 0
 
+        # 0) 优先差分：只下载变化部分（实测 61 MB → 0.6 MB）。
+        #    任何失败（基准不符、补丁损坏、网络中断）都静默回退整包。
+        if info.delta_url:
+            old_version = self.manifest.version
+            try:
+                code = self._try_delta(info)
+            except Exception as e:
+                self.log.warn(f"差分升级失败，回退整包: {e}")
+                code = None
+            if code is not None:
+                return code
+
         # 1) 下载 payload
         self._stage("download")
         work = Path(tempfile.gettempdir()) / f"MaaAuto_payload_dl_{int(time.time())}"
@@ -362,14 +375,59 @@ class UpgradeFlow:
             self._restart_if_needed("升级失败")
             return 2
 
-        # 5) 更新 manifest
+        # 5) 收尾
+        return self._finish(info, old_version, actual)
+
+    # ---- 差分尝试 ----
+    def _try_delta(self, info) -> Optional[int]:
+        """尝试差分升级。
+
+        :return: 成功返回退出码 0；不适用（基准不符等）返回 ``None`` 让调用方回退整包。
+        """
+        work = Path(tempfile.gettempdir()) / f"MaaAuto_delta_dl_{int(time.time())}"
+        work.mkdir(parents=True, exist_ok=True)
+        delta_file = work / info.delta_name
+        try:
+            self._stage("download")
+            self._msg(f"下载差分更新（{info.delta_size / 1048576:.2f} MB）...", "info")
+            download_file(info.delta_url, delta_file, log=self.log.info,
+                          progress=self._progress)
+
+            self._stage("verify")
+            actual = sha256_of_file(delta_file)
+            expected = (info.delta_sha or "").lower()
+            if expected and actual != expected:
+                raise RuntimeError(f"差分校验失败：期望 {expected[:12]}…，实际 {actual[:12]}…")
+
+            self._stage("stop_main")
+            if not request_main_exit(self.install_dir, log=self.log.info):
+                raise RuntimeError("无法停止主程序")
+
+            self._stage("apply")
+            old_version = self.manifest.version
+            result = apply_delta(self.install_dir, delta_file, log=self.log.info,
+                                 progress=self._progress, cancel_check=self._cancelled)
+            if result.base_mismatch:
+                # 不是同一份安装（用户手动替换过文件），整包才靠谱
+                self.log.info("本地文件与差分基准不符，改走整包")
+                return None
+            if not result.success:
+                raise RuntimeError(result.error or "差分应用失败")
+
+            self.log.info(f"差分应用成功（{result.replaced} 个文件）")
+            return self._finish(info, old_version, actual)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # ---- 收尾：manifest + 重启 ----
+    def _finish(self, info, old_version: str, source_hash: str) -> int:
         self._stage("manifest")
         try:
             self.manifest.version = info.latest
             self.manifest.installer_version = INSTALLER_VERSION
             self.manifest.last_upgrade_from = old_version
             self.manifest.last_checked_at = datetime.datetime.now().isoformat(timespec="seconds")
-            self.manifest.source_hash = actual
+            self.manifest.source_hash = source_hash
             write_manifest(self.install_dir, self.manifest)
         except Exception as e:
             self.log.warn(f"更新 .maaauto.json 失败: {e}")

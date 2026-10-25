@@ -4,6 +4,24 @@
 
 ---
 
+## [1.2.0] - 2026-10-25
+
+**差分更新**：升级下载量从整包 ~61 MB 降到 ~0.6 MB。
+
+- 新增 `installer/core/bspatch.py`：BSDIFF40 补丁应用端，**纯标准库**
+  （升级器仍只依赖 stdlib + psutil，体积不涨）；构建端用 `bsdiff4`。
+- 新增 `installer/core/delta.py`：`build_delta()` 生成差分包（文件级 + 按需 bsdiff），
+  `materialize()` 还原并逐文件校验 sha256。
+- 升级器：`check_update` 会找 `MaaAuto_delta_v{current}_to_{latest}.zip`；
+  优先差分，基准不符/补丁损坏/没有该资产时自动回退整包。
+- `apply_payload` 的替换/回滚逻辑抽成 `_commit_tree()`，整包与差分共用；
+  差分额外支持「删除清单」（上一版有、这一版删掉的文件）并纳入回滚。
+- `build_release.py`：新增 `--delta-from` / `--delta-base-version` / `--delta-auto`；
+  差分包写入 `SHA256SUMS.txt`。
+- `fake_release_server.py`：支持 `--delta`，离线可验差分链路。
+- 契约：`installer/contract.py` 新增 `delta_asset_prefix`。
+- 测试：69 → 78。
+
 ## [1.1.1] - 2026-10-25
 
 **随主程序 1.1.1 发布的小修版**。安装/升级链路本身无变化，只多做了一道发布前保险。

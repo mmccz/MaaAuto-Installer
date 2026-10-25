@@ -101,8 +101,8 @@ def find_iscc(explicit: str = "") -> Path:
 # --------------------------------------------------------------------------- #
 def read_app_info(source_dir: Path) -> dict:
     text = (source_dir / "app_info.py").read_text(encoding="utf-8")
-    keys = ["APP_VERSION", "APP_UPDATE_API",
-            "APP_MIN_INSTALLER_VERSION", "APP_PAYLOAD_ASSET_PREFIX"]
+    keys = ["APP_VERSION", "APP_UPDATE_API", "APP_MIN_INSTALLER_VERSION",
+            "APP_PAYLOAD_ASSET_PREFIX", "APP_DELTA_ASSET_PREFIX"]
     out = {}
     for key in keys:
         m = re.search(rf'^{key}\s*=\s*["\']([^"\']*)["\']', text, re.M)
@@ -120,7 +120,7 @@ def check_contract(source_dir: Path) -> dict:
     elif not VERSION_RE.match(version):
         problems.append(f"APP_VERSION={version!r} 不符合 X.Y.Z[(a|b|rc)N][.postN]")
     for key in ("APP_UPDATE_API", "APP_MIN_INSTALLER_VERSION",
-                "APP_PAYLOAD_ASSET_PREFIX"):
+                "APP_PAYLOAD_ASSET_PREFIX", "APP_DELTA_ASSET_PREFIX"):
         if not info[key]:
             problems.append(f"{key} 缺失")
 
@@ -216,6 +216,9 @@ def build_upgrade_exe(debug: bool) -> Path:
         "--paths", str(HERE),
         "--hidden-import", "psutil",
         "--hidden-import", "installer.core.payload",
+        # bsdiff4 只在构建机生成补丁时用；应用端是纯标准库 bspatch。
+        # 不排除的话 PyInstaller 会顺着 delta.py 里的惰性 import 把它打进去。
+        "--exclude-module", "bsdiff4",
         str(TOOLS / "upgrade_stub.py"),
     ]
     log("打包 upgrade.exe ...")
@@ -242,6 +245,53 @@ def make_payload_zip(payload: Path, upgrade_exe: Path, version: str,
             zf.write(p, p.relative_to(payload).as_posix())
             count += 1
     log(f"payload: {count} 个文件，{human(out.stat().st_size)}")
+    return out
+
+
+def fetch_prev_payload(info: dict, dest: Path) -> tuple:
+    """从 GitHub 取「最新正式版」的 payload 作为差分基准。
+
+     CI 每次发版都在干净环境里构建，没有上一版产物，所以按 ``APP_UPDATE_API``
+    查 latest，下载 ``payload_v{tag}.zip``（约 68 MB，runner 上很快）。
+    """
+    import json as _json
+    import urllib.request as _req
+
+    api = info["APP_UPDATE_API"]
+    log(f"查询上一版 Release: {api}")
+    request = _req.Request(api, headers={"User-Agent": "MaaAutoBuild/1.0"})
+    with _req.urlopen(request, timeout=30) as resp:
+        release = _json.load(resp)
+
+    tag = (release.get("tag_name") or "").lstrip("vV")
+    want = f"{info['APP_PAYLOAD_ASSET_PREFIX']}{tag}.zip"
+    url = ""
+    for asset in release.get("assets") or []:
+        if (asset.get("name") or "") == want:
+            url = asset.get("browser_download_url") or ""
+            break
+    if not url:
+        raise RuntimeError(f"最新 Release 里没有 {want}，无法生成差分包")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    log(f"下载差分基准: {want}")
+    with _req.urlopen(_req.Request(url, headers={"User-Agent": "MaaAutoBuild/1.0"}),
+                      timeout=600) as src, open(dest, "wb") as out:
+        while True:
+            chunk = src.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+    return tag, dest
+
+
+def build_delta_zip(payload: Path, base: Path, base_version: str,
+                    version: str, info: dict) -> Path:
+    """生成 ``{delta_prefix}{base}_to_{version}.zip``。"""
+    from installer.core import delta as delta_mod
+    out = DIST / f"{info['APP_DELTA_ASSET_PREFIX']}{base_version}_to_{version}.zip"
+    log(f"生成差分包: {base_version} -> {version}")
+    delta_mod.build_delta(payload, base, out, version, base_version, log=log)
     return out
 
 
@@ -316,6 +366,12 @@ def main() -> int:
     ap.add_argument("--keep-build", action="store_true", help="保留 _build/")
     ap.add_argument("--debug", action="store_true", help="upgrade.exe 保留控制台")
     ap.add_argument("--iscc", default="", help="ISCC.exe 路径")
+    ap.add_argument("--delta-from", default="",
+                    help="差分包基准：上一版 payload .zip 或已解压目录")
+    ap.add_argument("--delta-base-version", default="",
+                    help="基准版本号（--delta-from 给目录/无版本名时必填）")
+    ap.add_argument("--delta-auto", action="store_true",
+                    help="自动从 GitHub 最新 Release 下载 payload 作为基准（CI 用）")
     args = ap.parse_args()
 
     started = time.time()
@@ -368,10 +424,29 @@ def main() -> int:
         setup_sha = sha256_of(setup)
         online = compile_online(version, setup.name, setup_sha, iscc)
 
+        # 差分包（可选）：只包含变化的文件，实测 61 MB → 0.6 MB
+        delta_zip = None
+        base_path = args.delta_from
+        base_version = args.delta_base_version
+        if not base_path and args.delta_auto:
+            base_version, base_path = fetch_prev_payload(info, BUILD / "prev_payload.zip")
+        if base_path:
+            if not base_version:
+                m = re.search(r"(\d+\.\d+\.\d+(?:[ab]|rc)?\d*)", Path(base_path).name)
+                if not m:
+                    raise RuntimeError("--delta-from 无法推断版本号，请加 --delta-base-version")
+                base_version = m.group(1)
+            delta_zip = build_delta_zip(payload, Path(base_path), base_version,
+                                        version, info)
+        elif args.delta_auto or args.delta_from:
+            raise RuntimeError("未能确定差分基准")
+
         lines = []
         for p in (payload_zip, setup, online):
             lines.append(f"{sha256_of(p)}  {p.name}")
-        (DIST / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if delta_zip is not None:
+            lines.append(f"{sha256_of(delta_zip)}  {delta_zip.name}")
+        (DIST / "SHA256SUMS.txt").write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
 
         if not args.keep_build:
             shutil.rmtree(BUILD / "pyi_work", ignore_errors=True)
@@ -384,7 +459,7 @@ def main() -> int:
         print("=" * 64)
         print(f"构建完成（{time.time() - started:.0f}s）→ {DIST}")
         print("=" * 64)
-        for p in (setup, online, payload_zip):
+        for p in [setup, online, payload_zip] + ([delta_zip] if delta_zip else []):
             print(f"  {p.name:<52} {human(p.stat().st_size):>10}")
         print()
         print("README / Release 正文可直接引用 SHA256SUMS.txt")

@@ -63,7 +63,25 @@ def guess_version(payload: Path) -> str:
 
 
 def build_release(base_url: str, version: str, tag: str, payload: Path,
-                  sha: str, size: int, notes: str) -> dict:
+                  sha: str, size: int, notes: str,
+                  delta: Path = None, delta_sha: str = "") -> dict:
+    assets = [
+        {
+            "name": payload.name,
+            "browser_download_url": f"{base_url}/download/{payload.name}",
+            "size": size,
+            "content_type": "application/zip",
+            "digest": f"sha256:{sha}",
+        }
+    ]
+    if delta is not None:
+        assets.append({
+            "name": delta.name,
+            "browser_download_url": f"{base_url}/download/{delta.name}",
+            "size": delta.stat().st_size,
+            "content_type": "application/zip",
+            "digest": f"sha256:{delta_sha}",
+        })
     return {
         "tag_name": tag,
         "name": f"MaaAuto {tag}",
@@ -72,15 +90,7 @@ def build_release(base_url: str, version: str, tag: str, payload: Path,
         "draft": False,
         "prerelease": bool(re.search(r"(?:a|b|rc)\d+$", version)),
         "published_at": "2026-01-01T00:00:00Z",
-        "assets": [
-            {
-                "name": payload.name,
-                "browser_download_url": f"{base_url}/download/{payload.name}",
-                "size": size,
-                "content_type": "application/zip",
-                "digest": f"sha256:{sha}",
-            }
-        ],
+        "assets": assets,
     }
 
 
@@ -90,6 +100,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 由 main() 注入 ----
     release: dict = None
     payload_path: Path = None
+    asset_paths: dict = {}          # 资产名 -> 本地文件（含差分包）
 
     def log_message(self, fmt, *args):        # 默认会刷屏，简化
         print(f"  [http] {self.address_string()} {fmt % args}")
@@ -113,14 +124,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/download/"):
             name = path[len("/download/"):]
-            if name != self.payload_path.name:
+            local = self.asset_paths.get(name)
+            if local is None:
                 return self._send_json({"message": "not found"}, 404)
-            size = self.payload_path.stat().st_size
+            size = local.stat().st_size
             self.send_response(200)
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Length", str(size))
             self.end_headers()
-            with open(self.payload_path, "rb") as f:
+            with open(local, "rb") as f:
                 while True:
                     chunk = f.read(1024 * 256)
                     if not chunk:
@@ -164,6 +176,8 @@ def main() -> int:
     ap.add_argument("--notes", default="本地假 Release，用于离线验证升级链路")
     ap.add_argument("--corrupt-digest", action="store_true",
                     help="故意返回错误 sha256（测校验失败 → 回滚）")
+    ap.add_argument("--delta", default="",
+                    help="可选的差分包（测试差分升级链路时给）")
     ap.add_argument("--patch-manifest", default="",
                     help="顺手把这个安装目录的 extra.update_api 指向本服务")
     args = ap.parse_args()
@@ -183,10 +197,16 @@ def main() -> int:
         sha = "0" * 64
         print("[!] --corrupt-digest：返回的 sha256 是假的，升级应在校验阶段失败并回滚")
 
+    delta = Path(args.delta).resolve() if args.delta else None
+    delta_sha = sha256_of(delta) if delta else ""
     release = build_release(base_url, version, tag, payload, sha,
-                            payload.stat().st_size, args.notes)
+                            payload.stat().st_size, args.notes,
+                            delta=delta, delta_sha=delta_sha)
     Handler.release = release
     Handler.payload_path = payload
+    Handler.asset_paths = {payload.name: payload}
+    if delta is not None:
+        Handler.asset_paths[delta.name] = delta
 
     print("=" * 68)
     print(f"假 Release 已就绪：{tag}（payload {payload.name}，"

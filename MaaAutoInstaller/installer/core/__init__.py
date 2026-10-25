@@ -5,6 +5,8 @@
 * ``manifest``    —— ``.maaauto.json`` 读写
 * ``payload``     —— 升级核心（查版本 / 下载 / 校验 / 替换 / 回滚）
 * ``downloader``  —— 带进度的 HTTP 下载
+* ``delta``       —— 差分包生成（构建端）与还原（运行端）
+* ``bspatch``     —— BSDIFF40 补丁应用（纯标准库）
 """
 
 from installer.core.manifest import (Manifest, read_manifest, write_manifest,
@@ -15,10 +17,11 @@ from installer.core.payload import (
     parse_version, compare_versions, check_update, pick_payload_asset,
     sha256_of_file, is_main_running, request_main_exit,
     clear_upgrading_flag, write_failure_flag, clear_failure_flag,
-    apply_payload, restart_main, read_launch_args,
+    apply_payload, apply_delta, restart_main, read_launch_args,
     cleanup_old_exe, cleanup_backups,
     MAIN_EXE_NAME, UPGRADE_EXE_NAME, UPGRADE_FLAG_NAME, FAILURE_FLAG_NAME,
     DEFAULT_EXIT_TIMEOUT, DEFAULT_MIN_INSTALLER_VERSION,
+    DELTA_ASSET_PREFIX,
 )
 
 __all__ = [
@@ -29,8 +32,9 @@ __all__ = [
     "parse_version", "compare_versions", "check_update", "pick_payload_asset",
     "sha256_of_file", "is_main_running", "request_main_exit",
     "clear_upgrading_flag", "write_failure_flag", "clear_failure_flag",
-    "apply_payload", "restart_main", "read_launch_args",
+    "apply_payload", "apply_delta", "restart_main", "read_launch_args",
     "cleanup_old_exe", "cleanup_backups",
     "MAIN_EXE_NAME", "UPGRADE_EXE_NAME", "UPGRADE_FLAG_NAME", "FAILURE_FLAG_NAME",
     "DEFAULT_EXIT_TIMEOUT", "DEFAULT_MIN_INSTALLER_VERSION",
+    "DELTA_ASSET_PREFIX",
 ]
