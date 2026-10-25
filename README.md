@@ -75,6 +75,28 @@ upgrade.exe：读 .maaauto.json → 重新查询 Release
    清 .upgrading → 按 last_launch_args.json 重启主程序
 ```
 
+### 差分更新（1.2.0）
+
+有新版本时会先看有没有 `MaaAuto_delta_v{当前版本}_to_{新版本}.zip`：
+
+```
+upgrade.exe：找到差分包
+        ▼
+   下载（通常 0.5 MB 级）→ 校验资产 digest
+        ▼
+   逐文件还原：base_sha256 必须与本地文件一致 → bspatch 打补丁 → 校验目标 sha256
+        │  基准不符 / 补丁损坏 / 没有该资产 → 静默回退整包，不影响用户
+        ▼
+   替换 + 删除清单（上一版有、这一版没有的文件）→ 同一套备份/回滚
+```
+
+- 内容没变的文件完全不下载（Qt DLL / 模板等占 ~93% 体积）；
+- `upgrade.exe`、`MaaAuto.exe` 这类每次构建都会变的文件走 bsdiff 补丁
+  （实测 7.5 MB → 403 KB、5.4 MB → 148 KB）；
+- **应用端是纯标准库**（`installer/core/bspatch.py`），`bsdiff4` 只在构建机用，
+  升级器体积不变；
+- 只对「上一版 → 本版」有效；连跳多个版本会回退整包。
+
 - `config/`、`logs/`、`.maaauto.json` **永远不参与替换**。
 - 正在运行的 `upgrade.exe` 会被改名让位（`.old`），下次启动时清理，因此**升级器自身可以随 payload 更新**。
 - 用户取消、已是最新、检查失败等终态都会回到主程序（`--restart` 且主程序未运行时）。

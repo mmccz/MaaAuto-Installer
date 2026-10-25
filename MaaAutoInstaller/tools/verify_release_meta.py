@@ -72,6 +72,13 @@ for name in (f"MaaAuto_Setup_v{VERSION}-Windows-x64.exe",
         a = assets[name]
         print(f"     {name}: {a['size']} bytes, digest={(a.get('digest') or '')[:22]}…")
 
+delta_names = [n for n in assets if n.startswith("MaaAuto_delta_v")]
+check("差分包存在（1.2.0+）", bool(delta_names), str(list(assets)))
+for name in delta_names:
+    a = assets[name]
+    print(f"     {name}: {a['size']} bytes（{a['size']/1048576:.2f} MB）, "
+          f"digest={(a.get('digest') or '')[:22]}…")
+
 latest = http_json(f"https://api.github.com/repos/{REPO}/releases/latest")
 check(f"releases/latest = {TAG}", latest["tag_name"] == TAG, latest["tag_name"])
 
@@ -84,7 +91,11 @@ for line in sums_path.read_text(encoding="utf-8").splitlines():
     if line.strip():
         digest, name = line.split()
         sums[name] = digest
-check("SHA256SUMS 含 3 个产物", len(sums) == 3, str(list(sums)))
+# 3 个固定产物 + 可选的差分包
+check("SHA256SUMS 含 3~4 个产物", 3 <= len(sums) <= 4, str(list(sums)))
+check("差分包已写入 SHA256SUMS",
+      all(n in sums for n in delta_names) if delta_names else True,
+      str(list(sums)))
 for name, asset in assets.items():
     if name == "SHA256SUMS.txt":
         continue
