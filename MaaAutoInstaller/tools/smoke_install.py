@@ -39,10 +39,16 @@ HERE = Path(__file__).resolve().parent          # MaaAutoInstaller/tools/
 INSTALLER_ROOT = HERE.parent.parent             # MaaAuto-Installer/
 INSTALLER_PKG = HERE.parent                     # MaaAutoInstaller/
 DIST = INSTALLER_ROOT / "dist"
+sys.path.insert(0, str(INSTALLER_PKG))   # MaaAutoInstaller/，包名叫 installer
+from installer.core import shell_integration as shell  # noqa: E402
+
+# 必须装在**独立目录**：Inno 的卸载注册表项 / 开始菜单组 / 桌面快捷方式按 AppId
+# 全局共享，装在用户的正式安装目录（甚至用户自选的 D:\MaaAuto）上再卸载，会把
+# 用户那份的登记信息一起删掉（1.4.1 踩过：「设置→应用」变成「系统找不到应用」）。
 DEFAULT_DIR = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) \
-    / "Programs" / "MaaAuto"
-START_MENU = (Path(os.environ.get("APPDATA", tempfile.gettempdir()))
-              / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "MaaAuto")
+    / "Programs" / "MaaAuto_verify"
+START_MENU = shell.start_menu_group()
+DESKTOP_LNK = shell.desktop_lnk()
 
 fails = []
 
@@ -130,7 +136,8 @@ def main():
     ap.add_argument("version", nargs="?", default="",
                     help="版本号（可带 v 前缀）；缺省取 dist 里最新的 Setup")
     ap.add_argument("--setup", default="", help="直接指定 Setup 路径")
-    ap.add_argument("--dir", default="", help="安装目录（默认 %%LOCALAPPDATA%%\\Programs\\MaaAuto）")
+    ap.add_argument("--dir", default="",
+                    help="安装目录（默认 %%LOCALAPPDATA%%\Programs\MaaAuto_verify；别指向正式安装目录）")
     ap.add_argument("--keep", action="store_true", help="不卸载（排查用）")
     args = ap.parse_args()
 
@@ -145,6 +152,16 @@ def main():
         version, setup = find_setup(args.version)
 
     app_dir = Path(args.dir) if args.dir else DEFAULT_DIR
+    default_app = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MaaAuto"
+    if app_dir.resolve() == default_app.resolve():
+        print("  ! 拒绝在默认正式安装目录上跑 smoke（会删掉用户的安装与登记）",
+              flush=True)
+        return 1
+    foreign = shell.foreign_install(app_dir)
+    snapshot = shell.snapshot()
+    print(f"  已备份外壳集成：{snapshot.summary()}", flush=True)
+    if foreign is not None:
+        print(f"  ! 本机另有一份安装：{foreign}（跑完会还原它的登记）", flush=True)
 
     print(f"[1] 安装包检查（版本 {version or '?'}）", flush=True)
     if not check("安装包存在", bool(setup) and setup.exists(), str(setup)):
@@ -227,6 +244,13 @@ def main():
         check("安装目录已清空（无残留）", wait_gone(app_dir), str(app_dir))
         check("没有残留卸载器进程", not uninstaller_alive())
 
+    if not args.keep:
+        try:
+            print(f"[5] 还原外壳集成：{shell.restore(snapshot)}", flush=True)
+        except Exception as e:
+            print(f"  ! 还原外壳集成失败({e})，可跑 tools/repair_integration.py",
+                  flush=True)
+            fails.append("还原外壳集成")
     shutil.rmtree(tmp_root, ignore_errors=True)
 
     print("=" * 72, flush=True)

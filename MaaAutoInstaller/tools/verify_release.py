@@ -32,9 +32,29 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent          # MaaAutoInstaller/tools
 INSTALLER_ROOT = HERE.parent.parent             # MaaAuto-Installer/
 DIST = INSTALLER_ROOT / "dist"
-APP_DIR = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "MaaAuto"
-SM = (Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu"
-      / "Programs" / "MaaAuto")
+sys.path.insert(0, str(HERE.parent))   # MaaAutoInstaller/，包名叫 installer
+
+from installer.core import shell_integration as shell  # noqa: E402
+
+# 校验必须装在**独立目录**：Inno 的卸载注册表项 / 开始菜单组 / 桌面快捷方式
+# 是按 AppId 全局共享的，装在用户的正式安装目录（默认 %LOCALAPPDATA%\Programs\MaaAuto，
+# 或用户自选的 D:\MaaAuto）上再卸载，会把用户那份的登记信息一起删掉
+# —— 1.4.1 就是被这个脚本坑过：用户「设置→应用」变成「系统找不到应用」，
+# 开始菜单和桌面图标也一起没了。程序文件没动，坏的只是登记信息。
+APP_DIR = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "MaaAuto_verify"
+SM = shell.start_menu_group()
+DESKTOP_LNK = shell.desktop_lnk()
+
+# 开跑前备份「外壳集成」，结束时原样还原
+_foreign = shell.foreign_install(APP_DIR)
+if _foreign is not None:
+    print("=" * 72)
+    print(f"[!] 检测到本机另有一份 MaaAuto 安装在 {_foreign}")
+    print("    本脚本会临时改写共享的卸载注册表项和快捷方式，")
+    print("    跑完会自动还原；中途中断可用 tools/repair_integration.py 修复。")
+    print("=" * 72)
+_snapshot = shell.snapshot()
+print(f"[i] 已备份外壳集成：{_snapshot.summary()}")
 
 VERSION = sys.argv[1] if len(sys.argv) > 1 else ""
 if not VERSION:
@@ -115,6 +135,8 @@ def install(extra=None):
     if APP_DIR.exists():
         shutil.rmtree(APP_DIR, ignore_errors=True)
     shutil.rmtree(SM, ignore_errors=True)
+    if DESKTOP_LNK.exists():
+        DESKTOP_LNK.unlink()
     # 必须显式 /DIR：Inno 默认复用上次安装目录（本机曾被 deploy_dev.py 装到 D:\MaaAuto）
     args = [local_setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
             f"/DIR={APP_DIR}"]
@@ -265,8 +287,22 @@ code = uninstall()
 check("卸载退出码 0", code == 0, str(code))
 check("安装目录已删除", not APP_DIR.exists(), str(APP_DIR))
 check("开始菜单目录已删除", not SM.exists(), str(SM))
-check("桌面快捷方式不存在",
-      not (Path(os.environ["USERPROFILE"]) / "Desktop" / "MaaAuto.lnk").exists())
+check("桌面快捷方式不存在", not DESKTOP_LNK.exists())
+
+print()
+print("=" * 72)
+print("[7] 还原本机原有的外壳集成")
+try:
+    _restored = shell.restore(_snapshot)
+    print(f"  {_restored}")
+    if _foreign is not None:
+        loc = shell.installed_location()
+        check(f"用户那份安装的登记已恢复（{_foreign}）",
+              loc is not None and loc.resolve() == _foreign.resolve(), str(loc))
+        check("还原后的卸载器文件存在",
+              (_foreign / "unins000.exe").exists(), str(_foreign))
+finally:
+    shutil.rmtree(work, ignore_errors=True)
 
 print()
 print("=" * 72)

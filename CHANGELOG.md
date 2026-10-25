@@ -7,6 +7,44 @@
 
 ---
 
+## [1.4.2] - 2026-10-25
+
+**修复：本地校验脚本会删掉用户正式安装的图标与「设置→应用」登记。**
+
+### 现象
+
+用户装在 `D:\MaaAuto`（自定义目录），升级到 1.4.1 后：
+
+- 「设置 → 应用」里的 MaaAuto 显示「**系统找不到应用**」；
+- 开始菜单里的 MaaAuto 文件夹没了；
+- 桌面图标没了。
+
+程序文件和数据都还在，直接跑安装目录里的 `MaaAuto.exe` 一切正常。
+
+### 根因
+
+Inno 的这三样东西是**按 AppId 全局共享**的，跟装在哪个目录无关：
+
+- `HKCU\...\Uninstall\{AppId}_is1`（「设置 → 应用」那条记录）
+- 开始菜单组 `%APPDATA%\...\Programs\MaaAuto`
+- 桌面 `MaaAuto.lnk`
+
+`tools/verify_release.py` / `tools/smoke_install.py` 会「装一份 → 跑断言 → 卸载」，
+而且默认装在 `%LOCALAPPDATA%\Programs\MaaAuto` —— 与用户的正式安装**同一个 AppId**。
+于是校验脚本的卸载把用户那份的登记一起删了（卸载还带 `/PURGEDATA`）。
+
+### 修复
+
+- 新增 `installer/core/shell_integration.py`：读/写/删卸载注册表项、
+  `snapshot()` / `restore()` 备份还原（注册表值 + 快捷方式原始字节）、
+  `foreign_install()` 检测「本机另有一份安装」、`repair_integration()` 重建登记；
+- `verify_release.py`：改装到 `%LOCALAPPDATA%\Programs\MaaAuto_verify`，开跑前
+  `snapshot()`、结束时 `restore()`，并断言用户那份登记已还原；
+- `smoke_install.py`：同样装到 `MaaAuto_verify`，**拒绝**在 `Programs\MaaAuto`
+  这个正式目录上运行，跑完还原登记；
+- 新增 `tools/repair_integration.py`：给已经被误删的机器一键重建（不动程序文件/配置）；
+- 测试：83 → 92（`test_shell_integration.py` 9 项，含 AppId 与 `installer.iss` 一致性校验）。
+
 ## [1.4.1] - 2026-10-25
 
 **随主程序 1.4.1 发布**：安装器 / 升级器代码无改动，仅同步版本号

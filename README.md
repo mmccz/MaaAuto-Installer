@@ -198,7 +198,22 @@ python tools\smoke_install.py 1.1.1
 
 # 发布后元数据：Release/digest/公告源（不下载大文件，发版后跑）
 python tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.1.1
+
+# 被误删了图标 / 「设置→应用」条目：重建登记（不动程序文件与配置）
+python tools\repair_integration.py
+python tools\repair_integration.py --dir D:\MaaAuto
 ```
+
+> ⚠️ **千万别把校验脚本指向正式安装目录**。Inno 的卸载注册表项、开始菜单组、桌面快捷方式
+> 都是**按 AppId 全局共享**的，跟装在哪个目录无关：在 `MaaAuto` 目录上「装一份 → 卸载」，
+> 会把你（或用户）真正那份的「设置 → 应用」记录和图标一起删掉。1.4.1 就是这样翻车的
+> （现象：系统提示「找不到应用」，图标全没）。脚本现在默认装到
+> `%LOCALAPPDATA%\Programs\MaaAuto_verify`，跑前 `snapshot()` 备份、跑完 `restore()` 还原，
+> `smoke_install.py` 还会直接拒绝在正式目录上运行。
+
+`installer/core/shell_integration.py` 提供 `snapshot()` / `restore()` /
+`foreign_install()` / `repair_integration()`；`tests/test_shell_integration.py`
+里有一项会校验代码里的 AppId 与 `packaging/installer.iss` 是否一致。
 
 ### CI
 
