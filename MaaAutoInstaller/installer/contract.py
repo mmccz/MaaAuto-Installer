@@ -1,22 +1,24 @@
-"""安装器与主程序 ``MaaAutoProject/app_info.py`` 的冻结契约。
+"""Frozen contract between the installer and ``MaaAutoProject/app_info.py``.
 
-这里的值会写入安装目录的 ``.maaauto.json`` 的 ``extra``，升级器之后只读它。
-协议约定（2026-10-24 统一为 1.0.0 基线）：
+These values are written into the ``extra`` block of ``.maaauto.json`` in the
+install directory; the updater only reads them from there afterwards.
+Protocol agreement (unified to the 1.0.0 baseline on 2026-10-24):
 
 * ``APP_UPDATE_API``            == ``extra.update_api``
 * ``APP_MIN_INSTALLER_VERSION`` == ``extra.min_installer_version``
 * ``APP_PAYLOAD_ASSET_PREFIX``  == ``extra.payload_asset_prefix``
-* ``APP_DELTA_ASSET_PREFIX``    == ``extra.delta_asset_prefix``（差分资产命名）
+* ``APP_DELTA_ASSET_PREFIX``    == ``extra.delta_asset_prefix`` (delta asset naming)
 
-修改任一值等于协议变更，必须双方同时发版；构建期由
-``build_release.py::check_app_info_contract()`` 做强校验。
+Changing any value is a protocol change and requires releasing both sides
+together; the build enforces it strictly via
+``build_release.py::check_app_info_contract()``.
 """
 
 from typing import Dict
 
 
 def default_manifest_extra() -> Dict[str, object]:
-    """返回一份全新的 ``Manifest.extra`` 默认值（调用方可安全修改）。"""
+    """Return a fresh copy of the default ``Manifest.extra`` (callers may mutate it)."""
     return {
         "github_url": "https://github.com/mmccz/MaaAuto-Tool-works",
         "update_api": "https://api.github.com/repos/mmccz/MaaAuto-Tool-works/releases/latest",
@@ -29,7 +31,7 @@ def default_manifest_extra() -> Dict[str, object]:
     }
 
 
-# extra 键 → app_info.py 常量名（构建期断言用）
+# extra key -> app_info.py constant name (asserted at build time)
 APP_INFO_CONSTANTS = {
     "update_api": "APP_UPDATE_API",
     "min_installer_version": "APP_MIN_INSTALLER_VERSION",

@@ -1,7 +1,8 @@
-"""本地假 Release 服务器（离线升级测试工具）的单元测试。
+"""Unit tests for the local fake Release server (offline upgrade test tool).
 
-它把升级链路从「必须等发版」变成可复现的本地流程，所以它自己的行为也要被钉住：
-JSON 形状不对 / digest 形状不对，会让离线测试得出错误的结论。
+It turns the upgrade path from "wait for a release" into a reproducible local
+flow, so its own behaviour must be pinned down too: a wrong JSON shape or digest
+shape would make the offline test reach wrong conclusions.
 """
 
 import json
@@ -40,7 +41,7 @@ def test_build_release_shape(tmp_path):
         "http://127.0.0.1:8765/download/MaaAuto_payload_v1.0.2.zip"
     assert asset["digest"] == "sha256:" + "ab" * 32
     assert asset["size"] == 10
-    json.dumps(rel)          # 必须可序列化
+    json.dumps(rel)          # must be JSON serializable
 
 
 def test_build_release_marks_prerelease(tmp_path):
@@ -72,7 +73,7 @@ def test_patch_manifest_sets_api_and_downgrades_version(tmp_path):
     data = json.loads(manifest.read_text(encoding="utf-8"))
     assert data["version"] == "1.0.0"
     assert data["extra"]["update_api"] == "http://127.0.0.1:8765/releases/latest"
-    assert data["extra"]["keep"] == 1        # 其它字段不能丢
+    assert data["extra"]["keep"] == 1        # other fields must survive
 
 
 def test_patch_manifest_creates_extra(tmp_path):

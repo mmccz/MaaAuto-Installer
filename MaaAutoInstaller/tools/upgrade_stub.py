@@ -1,17 +1,18 @@
-"""MaaAuto 升级器（``upgrade.exe``）—— 3.0.0 payload 模式。
+"""MaaAuto updater (``upgrade.exe``) -- 3.0.0 payload mode.
 
-不再在用户机上编译：下载 CI 产出的 ``MaaAuto_payload_v{ver}.zip``，
-校验、解压、备份替换、更新 manifest，失败回滚。
+No compiling on the user's machine any more: download the CI-built
+``MaaAuto_payload_v{ver}.zip``, verify it, unpack, back up and replace, update
+the manifest, and roll back on failure.
 
-命令行（与 2.x 保持一致，主程序无需改调用方式）::
+Command line (unchanged from 2.x, the main app needs no call-site changes) ::
 
     upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui]
                 [--downgrade] [--channel stable|beta]
 
-``--no-ui`` 完全无窗口，只写日志，供自动化/CI 使用；``--silent`` 仍显示
-一个不可交互的进度窗（2.x 的既定语义）。
+``--no-ui`` has no window at all and only writes logs, for automation/CI;
+``--silent`` still shows a non-interactive progress window (the 2.x semantics).
 
-退出码：0 成功/有新版本；1 仅 --check-only 且已最新；2 错误。
+Exit codes: 0 success/update available; 1 already latest with --check-only; 2 error.
 """
 
 import argparse
@@ -24,14 +25,14 @@ from typing import Optional
 import traceback
 from pathlib import Path
 
-# 控制台编码在部分环境下是 cp1252，打印中文日志会崩；统一切 UTF-8。
+# Console encoding is cp1252 in some environments and non-ASCII logs crash; force UTF-8.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-# 兼容两种布局：① 仓库里 tools/upgrade_stub.py ② 打包后的根目录
+# Support both layouts: (1) tools/upgrade_stub.py in the repo, (2) the packaged root dir
 _HERE = Path(__file__).resolve().parent
 if (_HERE / "installer").is_dir():
     _ROOT = _HERE
@@ -57,7 +58,7 @@ MAIN_EXE = "MaaAuto.exe"
 
 
 # --------------------------------------------------------------------------- #
-# 参数
+# Arguments
 # --------------------------------------------------------------------------- #
 def parse_args(argv):
     p = argparse.ArgumentParser(add_help=False)
@@ -81,7 +82,7 @@ def get_install_dir() -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 日志
+# Logging
 # --------------------------------------------------------------------------- #
 class Logger:
     def __init__(self, install_dir: Path):
@@ -127,7 +128,7 @@ class Logger:
     def error(self, msg): self._write("ERROR", msg)
 
     def copy_to_install(self) -> None:
-        """把本次日志复制到 ``<install>/logs/upgrade/``。"""
+        """Copy this run's log to ``<install>/logs/upgrade/``."""
         if not self.log_path or not Path(self.log_path).exists():
             return
         try:
@@ -140,7 +141,7 @@ class Logger:
 
 
 # --------------------------------------------------------------------------- #
-# 流程
+# Flow
 # --------------------------------------------------------------------------- #
 class UpgradeFlow:
     def __init__(self, args, log: Logger,
@@ -156,7 +157,7 @@ class UpgradeFlow:
         self.manifest = None
         self._fail_reason = ""
 
-    # ---- 回调 ----
+    # ---- callbacks ----
     def _stage(self, key):
         if self.on_stage:
             try:
@@ -187,7 +188,7 @@ class UpgradeFlow:
                 return False
         return False
 
-    # ---- 终态 ----
+    # ---- terminal states ----
     def _restart_if_needed(self, reason: str) -> bool:
         if not getattr(self.args, "restart", False):
             self.log.info(f"未指定 --restart，跳过重启（{reason}）")
@@ -215,7 +216,7 @@ class UpgradeFlow:
         except Exception as e:
             self.log.warn(f"写 upgrade_failed.flag 失败: {e}")
 
-    # ---- 检查 ----
+    # ---- check ----
     def _settings(self):
         extra = (self.manifest.extra if self.manifest else {}) or {}
         api = extra.get("update_api") or \
@@ -264,7 +265,7 @@ class UpgradeFlow:
         self._msg(f"发现新版本：v{info.current} → v{info.latest}", "info")
         return info, 0
 
-    # ---- 仅检查 ----
+    # ---- check only ----
     def run_check_only(self) -> int:
         try:
             _info, code = self._do_check()
@@ -274,7 +275,7 @@ class UpgradeFlow:
             self._msg(f"检查更新失败：{e}", "error")
             return 2
 
-    # ---- 完整升级 ----
+    # ---- full upgrade ----
     def run_full(self) -> int:
         cleanup_old_exe(self.install_dir)
         cleanup_backups(self.install_dir)
@@ -297,8 +298,9 @@ class UpgradeFlow:
             self._restart_if_needed("用户取消")
             return 0
 
-        # 0) 优先差分：只下载变化部分（实测 61 MB → 0.6 MB）。
-        #    任何失败（基准不符、补丁损坏、网络中断）都静默回退整包。
+        # 0) Prefer delta: download only what changed (measured 61 MB -> 0.6 MB).
+        #    Any failure (base mismatch, corrupt patch, dropped network) falls back
+        #    to the full package silently.
         if info.delta_url or getattr(info, 'delta_chain', None):
             old_version = self.manifest.version
             try:
@@ -309,7 +311,7 @@ class UpgradeFlow:
             if code is not None:
                 return code
 
-        # 1) 下载 payload
+        # 1) download payload
         self._stage("download")
         work = Path(tempfile.gettempdir()) / f"MaaAuto_payload_dl_{int(time.time())}"
         work.mkdir(parents=True, exist_ok=True)
@@ -330,7 +332,7 @@ class UpgradeFlow:
             self._restart_if_needed("用户取消")
             return 0
 
-        # 2) 校验
+        # 2) verify
         self._stage("verify")
         try:
             actual = sha256_of_file(payload)
@@ -350,7 +352,7 @@ class UpgradeFlow:
             return 2
         self.log.info(f"payload sha256: {actual}")
 
-        # 3) 停主程序
+        # 3) stop main app
         self._stage("stop_main")
         if not request_main_exit(self.install_dir, log=self.log.info):
             self.log.error("无法停止主程序")
@@ -360,7 +362,7 @@ class UpgradeFlow:
             self._restart_if_needed("无法停止主程序")
             return 2
 
-        # 4) 替换
+        # 4) replace
         self._stage("apply")
         old_version = self.manifest.version
         result = apply_payload(self.install_dir, payload, log=self.log.info,
@@ -375,16 +377,17 @@ class UpgradeFlow:
             self._restart_if_needed("升级失败")
             return 2
 
-        # 5) 收尾
+        # 5) wrap up
         return self._finish(info, old_version, actual)
 
-    # ---- 差分尝试（单个或串行链） ----
+    # ---- delta attempt (single patch or serial chain) ----
     def _try_delta(self, info) -> Optional[int]:
-        """尝试差分升级：一个包或「多步串行」。
+        """Try a delta upgrade: one package or a serial chain.
 
-        跳版本（如 1.2.0 → 1.4.0）时没有直达差分包，但可以按
-        1.2.0 → 1.3.0 → 1.4.0 逐级打补丁。
-        :return: 成功返回退出码 0；不适用（基准不符等）返回 ``None`` 让调用方回退整包。
+        When versions are skipped (e.g. 1.2.0 -> 1.4.0) there is no direct delta
+        package, but the chain 1.2.0 -> 1.3.0 -> 1.4.0 can be patched step by step.
+        :return: exit code 0 on success; ``None`` when not applicable (base
+                 mismatch etc.), so the caller falls back to the full package.
         """
         chain = list(getattr(info, "delta_chain", None) or [])
         if not chain:
@@ -442,7 +445,7 @@ class UpgradeFlow:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    # ---- 收尾：manifest + 重启 ----
+    # ---- wrap up: manifest + restart ----
     def _finish(self, info, old_version: str, source_hash: str) -> int:
         self._stage("manifest")
         try:
@@ -465,7 +468,7 @@ class UpgradeFlow:
 
 
 # --------------------------------------------------------------------------- #
-# 无 UI 模式
+# no-UI mode
 # --------------------------------------------------------------------------- #
 def run_headless(args, log: Logger) -> int:
     flow = UpgradeFlow(args, log)
@@ -473,7 +476,7 @@ def run_headless(args, log: Logger) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# 进度窗
+# progress window
 # --------------------------------------------------------------------------- #
 STAGE_TEXT = {
     "locate": "读取安装信息…",
@@ -489,12 +492,13 @@ STAGE_TEXT = {
 
 
 def run_ui(args, log: Logger, mode: str = "upgrade") -> int:
-    """进度窗（纯 ctypes/Win32）。
+    """Progress window (plain ctypes/Win32).
 
-    流程跑在 ``threading.Thread`` 里；窗口的 ``post_stage`` / ``post_progress``
-    / ``post_message`` 只把值塞进槽位再 ``PostMessageW``，绝不跨线程直接
-    ``SetWindowTextW`` —— 那样会偶发 0xC0000005（历史上真崩过），这和原来
-    「回调必须走 Qt Signal」是同一个约束。
+    The flow runs in a ``threading.Thread``; the window's ``post_stage`` /
+    ``post_progress`` / ``post_message`` only stash values into slots and then
+    ``PostMessageW`` -- they never ``SetWindowTextW`` from another thread, which
+    occasionally crashed with 0xC0000005 (it really happened historically). That
+    is the same constraint as "callbacks must go through a Qt Signal".
     """
     from installer.core.native_ui import NativeProgressWindow
 
@@ -525,7 +529,7 @@ def run_ui(args, log: Logger, mode: str = "upgrade") -> int:
 
 
 # --------------------------------------------------------------------------- #
-# 入口
+# entry point
 # --------------------------------------------------------------------------- #
 def main() -> int:
     args = parse_args(sys.argv[1:])

@@ -1,24 +1,27 @@
-"""BSDIFF40 补丁的应用端（纯标准库，不引入第三方依赖）。
+"""BSDIFF40 patch applier (stdlib only, no third-party dependency).
 
-为什么自己写：``upgrade.exe`` 目前只依赖标准库 + psutil（7.5 MB），加一个
-bsdiff 的二进制依赖会把它撑大、还要处理架构/杀软问题。补丁**生成**在构建机
-上用 ``bsdiff4`` 完成（只影响 CI/本机打包），**应用**在这里用 ``bz2`` 完成。
+Why hand-rolled: ``upgrade.exe`` currently depends only on the stdlib + psutil
+(7.5 MB); adding a bsdiff binary dependency would bloat it and drag in
+architecture/AV problems. Patch **generation** happens on the build machine with
+``bsdiff4`` (affects CI/local packaging only), **applying** happens here with
+``bz2``.
 
-文件格式（Colin Percival 的 bsdiff，行内常称 BSDIFF40）::
+File format (Colin Percival bsdiff, commonly called BSDIFF40)::
 
     "BSDIFF40" | ctrl_len:int64 | diff_len:int64 | new_size:int64
     ctrl_block  = bz2( control triples:  (x, y, z) * n )
-    diff_block  = bz2( x 段逐字节相加的差值 )
-    extra_block = bz2( y 段逐字节新内容 )
+    diff_block  = bz2( byte-wise difference added to the x segment )
+    extra_block = bz2( new bytes for the y segment )
 
     new = 0
     old = 0
-    逐个三元组：
-        new[new:new+x] = old[old:old+x] + diff[x 段]      # 逐字节相加
-        new[new+x:new+x+y] = extra[y 段]
+    for each triple:
+        new[new:new+x] = old[old:old+x] + diff[x segment]     # byte-wise add
+        new[new+x:new+x+y] = extra[y segment]
         old += x + z;  new += x + y
 
-int64 采用「最高位当符号位」的写法（详见 ``_offtin``），和 bsdiff 原实现一致。
+int64 uses the high bit as the sign bit (see ``_offtin``), matching the original
+bsdiff implementation.
 """
 
 import bz2
@@ -28,7 +31,7 @@ MAGIC = b"BSDIFF40"
 
 
 def _offtin(buf: bytes) -> int:
-    """bsdiff 的 8 字节整数：小端绝对值 + 最高位符号。"""
+    """bsdiff 8-byte integer: little-endian magnitude plus the sign in the high bit."""
     if len(buf) != 8:
         raise ValueError("int64 长度必须为 8")
     y = buf[7] & 0x7F
@@ -38,7 +41,7 @@ def _offtin(buf: bytes) -> int:
 
 
 def _offtout(value: int) -> bytes:
-    """``_offtin`` 的逆操作（测试/自检用）。"""
+    """Inverse of ``_offtin`` (for tests/self-checks)."""
     if value < 0:
         y = -value
         sign = 0x80
@@ -62,7 +65,7 @@ def _read_exact(f, n: int) -> bytes:
 
 def apply_patch(old: bytes, patch: bytes,
                 progress: Optional[Callable[[int, int], None]] = None) -> bytes:
-    """把 ``patch`` 应用到 ``old``，返回新内容（不合法时抛 ``ValueError``）。"""
+    """Apply ``patch`` to ``old`` and return the new content (raises ``ValueError`` when invalid)."""
     if len(patch) < 32 or patch[:8] != MAGIC:
         raise ValueError("不是 BSDIFF40 补丁")
     ctrl_len = _offtin(patch[8:16])
@@ -119,7 +122,7 @@ def apply_patch(old: bytes, patch: bytes,
 
 def apply_patch_file(old_path, patch_path, out_path,
                      progress: Optional[Callable[[int, int], None]] = None) -> int:
-    """文件版：读旧文件 + 补丁，写出新文件，返回新文件字节数。"""
+    """File variant: read the old file + patch, write the new file, return its byte count."""
     with open(patch_path, "rb") as f:
         patch = f.read()
     with open(old_path, "rb") as f:

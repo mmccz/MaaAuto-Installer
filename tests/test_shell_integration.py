@@ -1,9 +1,10 @@
-"""外壳集成（卸载注册表项 / 开始菜单 / 桌面快捷方式）的备份还原测试。
+"""Backup/restore tests for shell integration (uninstall registry key / Start menu / desktop shortcut).
 
-背景（1.4.1 事故）：本地校验脚本用同一个 Inno AppId 装到
-``%LOCALAPPDATA%\\Programs\\MaaAuto`` 再卸载，而 Inno 的卸载注册表项、开始菜单组、
-桌面快捷方式都是**按 AppId 全局共享**的 —— 用户那份装在 ``D:\\MaaAuto`` 的登记被
-一起删掉，Windows 里显示「系统找不到应用」，图标也没了。
+Background (the 1.4.1 incident): the local check script installed to
+``%LOCALAPPDATA%\\Programs\\MaaAuto`` with the same Inno AppId and then uninstalled,
+while Inno's uninstall registry key, Start menu group and desktop shortcut are
+**shared globally by AppId** -- so the user's registration for ``D:\\MaaAuto`` was
+deleted with it, Windows showed "the system cannot find the app", and the icons were gone.
 """
 
 import os
@@ -21,25 +22,25 @@ from installer.core import shell_integration as shell  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
-# 常量必须和 Inno 脚本一致
+# constants must match the Inno script
 # --------------------------------------------------------------------------- #
 def test_app_id_matches_installer_iss():
     iss = (PKG / "packaging" / "installer.iss").read_text(encoding="utf-8")
     app_id_line = [l for l in iss.splitlines() if l.strip().startswith("AppId=")][0]
-    # Inno 里 {{ 表示一个字面量 {，所以实际 AppId 是 {6F3A...}
+    # in Inno, {{ means a literal {, so the real AppId is {6F3A...}
     literal = app_id_line.split("=", 1)[1].strip().replace("{{", "{", 1)
     assert literal == shell.APP_ID
     assert shell.UNINSTALL_KEY == shell.APP_ID + "_is1"
-    # 图标组名也要和 [Icons] 的 {group} 一致
+    # the icon group name must match {group} in [Icons]
     assert "DefaultGroupName=" + shell.ICON_GROUP in iss
 
 
 # --------------------------------------------------------------------------- #
-# 快照 / 还原（不碰真实注册表与真实快捷方式）
+# snapshot / restore (never touches the real registry or real shortcuts)
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
-    """把三处全局路径都指到 tmp，注册表读写换成内存字典。"""
+    """Point all three global paths at tmp and swap registry I/O for an in-memory dict."""
     group = tmp_path / "StartMenu" / "MaaAuto"
     desktop = tmp_path / "Desktop" / "MaaAuto.lnk"
     state = {"key": None}
@@ -73,7 +74,7 @@ def test_snapshot_captures_everything(sandbox):
 
 
 def test_restore_puts_user_state_back(sandbox):
-    """模拟校验脚本：注册表被改写、快捷方式被删/被换成校验版的 → 还原。"""
+    """Simulate the check script: registry rewritten, shortcuts deleted/replaced by the verify copy -> restore."""
     group, desktop, state = sandbox["group"], sandbox["desktop"], sandbox["state"]
     group.mkdir(parents=True)
     (group / "MaaAuto.lnk").write_bytes(b"LNK-APP")
@@ -82,7 +83,7 @@ def test_restore_puts_user_state_back(sandbox):
     state["key"] = [("InstallLocation", r"D:\MaaAuto\\", 1)]
     snap = shell.snapshot()
 
-    # 校验脚本干的事：注册表指向校验目录、快捷方式清空
+    # what the check script does: registry points at the verify dir, shortcuts cleared
     state["key"] = [("InstallLocation", r"C:\verify\\", 1)]
     if group.exists():
         import shutil
@@ -97,7 +98,7 @@ def test_restore_puts_user_state_back(sandbox):
 
 
 def test_restore_clears_entries_created_by_verify(sandbox):
-    """原本没有登记（用户没装）→ 校验跑完不能留下残留。"""
+    """Nothing was registered beforehand (user never installed) -> the check run must leave no residue."""
     group, desktop, state = sandbox["group"], sandbox["desktop"], sandbox["state"]
     state["key"] = None
     snap = shell.snapshot()
@@ -115,7 +116,7 @@ def test_restore_clears_entries_created_by_verify(sandbox):
 
 
 # --------------------------------------------------------------------------- #
-# 检测「本机另有一份安装」
+# detect a second install on this machine
 # --------------------------------------------------------------------------- #
 def test_foreign_install_detected(monkeypatch, tmp_path):
     monkeypatch.setattr(shell, "read_uninstall_key",
@@ -135,7 +136,7 @@ def test_foreign_install_none_without_entry(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 修复受损机器
+# repair a damaged machine
 # --------------------------------------------------------------------------- #
 def test_repair_requires_existing_exe(tmp_path):
     with pytest.raises(FileNotFoundError):
@@ -164,7 +165,7 @@ def test_repair_writes_registry_and_links(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Microsoft Store 版 Python：%APPDATA% 被重定向到 LocalCache
+# Microsoft Store Python: %APPDATA% is redirected to LocalCache
 # --------------------------------------------------------------------------- #
 def test_packaged_python_detection(monkeypatch):
     monkeypatch.setattr(shell.sys, "prefix",
@@ -235,7 +236,7 @@ def test_write_lnk_uses_powershell_when_packaged(monkeypatch, tmp_path):
 
 
 def test_restore_keeps_real_install_when_snapshot_was_empty(monkeypatch, tmp_path):
-    """快照时没读到登记，但那条登记指向一个仍在的正式安装 → 不能删。"""
+    """The snapshot read no registration, but the live one points at an existing real install -> keep it."""
     install = tmp_path / "app"
     install.mkdir()
     (install / shell.MAIN_EXE).write_bytes(b"exe")

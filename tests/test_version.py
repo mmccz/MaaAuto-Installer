@@ -1,7 +1,8 @@
-"""版本解析 / 比较 / payload 资产匹配 / 频道选择的测试。
+"""Tests for version parsing / comparison / payload asset matching / channel selection.
 
-这些是「升级断了」最常见的原因：版本号解析错 → 认为没有新版本，
-或者 asset 名字对不上 → 找不到下载地址。
+These are the most common causes of a broken upgrade: a version string parsed
+wrong, so no new version is seen; or an asset name that does not match, so no
+download URL is found.
 """
 
 import pytest
@@ -11,7 +12,7 @@ from installer.core import payload
 
 
 # --------------------------------------------------------------------------- #
-# 版本解析
+# version parsing
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("text,expected", [
     ("1.0.0", (1, 0, 0, 3, 0, 0)),
@@ -34,8 +35,8 @@ def test_parse_version_invalid(text):
     ("1.0.1", "1.0.0", 1),
     ("1.0.0", "1.0.1", -1),
     ("1.0.0", "1.0.0", 0),
-    ("1.0.1b1", "1.0.0", 1),        # 预发布也比旧正式版新
-    ("1.0.1b1", "1.0.1", -1),       # 但比同版本正式版旧
+    ("1.0.1b1", "1.0.0", 1),        # a prerelease is still newer than an older stable
+    ("1.0.1b1", "1.0.1", -1),       # but older than the same version's stable
     ("1.0.1b2", "1.0.1b1", 1),
     ("1.0.1rc1", "1.0.1b9", 1),
 ])
@@ -48,7 +49,7 @@ def test_compare_versions_invalid():
 
 
 # --------------------------------------------------------------------------- #
-# payload 资产
+# payload assets
 # --------------------------------------------------------------------------- #
 def test_pick_payload_asset_exact_name():
     release = {"assets": [
@@ -77,7 +78,7 @@ def test_sha_from_asset_digest():
 
 
 # --------------------------------------------------------------------------- #
-# 频道 / check_update
+# channel / check_update
 # --------------------------------------------------------------------------- #
 def _release(tag, payload_prefix="MaaAuto_payload_v", version=None):
     version = version or tag.lstrip("v")

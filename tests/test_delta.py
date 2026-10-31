@@ -1,9 +1,9 @@
-"""差分更新测试（1.2.0 新增）。
+"""Delta update tests (new in 1.2.0).
 
-覆盖三块：
-* ``bspatch``：补丁应用端（纯标准库）必须与 ``bsdiff4`` 的产物逐字节一致；
-* ``delta``：构建 → 还原的往返、基准不符的拒绝、删除清单；
-* ``payload.apply_delta``：真实安装目录上的替换 / 回滚 / 受保护目录不动。
+Covers three areas:
+* ``bspatch``: the patch applier (pure stdlib) must byte-match ``bsdiff4`` output;
+* ``delta``: build -> restore round trip, base mismatch rejection, delete list;
+* ``payload.apply_delta``: replace / rollback / protected dirs untouched on a real install dir.
 """
 
 import zipfile
@@ -33,11 +33,11 @@ def test_bspatch_roundtrip_shapes():
 def test_bspatch_rejects_garbage():
     with pytest.raises(ValueError):
         bspatch.apply_patch(b"abc", b"not a patch")
-    # 头部声明了负长度（最高位置 1）→ 必须拒绝
+    # header declares a negative length (top bit set) -> must be rejected
     bad_header = b"BSDIFF40" + b"\xff" * 8 + b"\x00" * 8 + b"\x00" * 8
     with pytest.raises(ValueError):
         bspatch.apply_patch(b"abc", bad_header)
-    # 声明的块长度大于实际数据 → 必须拒绝
+    # declared block length exceeds the actual data -> must be rejected
     truncated = (b"BSDIFF40" + bspatch._offtout(100)
                  + bspatch._offtout(0) + bspatch._offtout(10))
     with pytest.raises(ValueError):
@@ -45,7 +45,7 @@ def test_bspatch_rejects_garbage():
 
 
 # --------------------------------------------------------------------------- #
-# delta 构建 / 还原
+# delta build / restore
 # --------------------------------------------------------------------------- #
 def _write(path: Path, data: bytes):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,15 +55,15 @@ def _write(path: Path, data: bytes):
 def make_pair(tmp_path: Path):
     old = tmp_path / "old"
     new = tmp_path / "new"
-    # 不变
+    # unchanged
     _write(old / "_internal/stable.dll", b"S" * 4096)
     _write(new / "_internal/stable.dll", b"S" * 4096)
-    # 小改（适合补丁）
+    # small change (good fit for a patch)
     _write(old / "MaaAuto.exe", b"M" * 20000)
     _write(new / "MaaAuto.exe", b"M" * 19000 + b"CHANGED" * 100)
-    # 新增
+    # added
     _write(new / "_internal/new.dll", b"N" * 1024)
-    # 删除
+    # deleted
     _write(old / "_internal/gone.dll", b"G" * 1024)
     return old, new
 
@@ -74,18 +74,18 @@ def test_build_and_materialize_roundtrip(tmp_path):
     stat = delta.build_delta(new, old, out, "1.2.0", "1.1.1")
 
     assert out.exists()
-    assert stat["patch_files"] >= 1          # MaaAuto.exe 应走补丁
-    assert stat["deleted"] == 1              # gone.dll 在删除清单里
+    assert stat["patch_files"] >= 1          # MaaAuto.exe should go through a patch
+    assert stat["deleted"] == 1              # gone.dll is on the delete list
 
     stage = tmp_path / "stage"
     count, deletes = delta.materialize(out, old, stage)
     assert count == stat["patch_files"] + stat["full_files"]
     assert deletes == ["_internal/gone.dll"]
 
-    # 还原出来的文件必须和目标完全一致
+    # restored files must be byte-identical to the target
     for rel in ("MaaAuto.exe", "_internal/new.dll"):
         assert (stage / rel).read_bytes() == (new / rel).read_bytes()
-    # 内容没变的文件不该进包
+    # unchanged files should not be in the package
     assert not (stage / "_internal/stable.dll").exists()
 
 
@@ -94,17 +94,17 @@ def test_base_mismatch_is_detected(tmp_path):
     out = tmp_path / "delta.zip"
     delta.build_delta(new, old, out, "1.2.0", "1.1.1")
 
-    # 篡改本地基准文件（模拟用户手动替换过文件）
+    # tamper with the local base file (simulates a user replacing files by hand)
     _write(old / "MaaAuto.exe", b"X" * 20000)
     with pytest.raises(delta.BaseMismatch):
         delta.materialize(out, old, tmp_path / "stage")
 
 
 def test_delta_delete_list_is_applied_by_apply_delta(tmp_path):
-    """apply_delta 在真实安装目录上：替换 + 删除 + 保护 config。"""
+    """apply_delta on a real install dir: replace + delete + protect config."""
     install = tmp_path / "app"
     old, new = make_pair(tmp_path)
-    # 让 install 目录起点等于 old
+    # make the install dir start out identical to old
     for src in old.rglob("*"):
         if src.is_file():
             _write(install / src.relative_to(old), src.read_bytes())
@@ -119,8 +119,8 @@ def test_delta_delete_list_is_applied_by_apply_delta(tmp_path):
 
     assert (install / "MaaAuto.exe").read_bytes() == (new / "MaaAuto.exe").read_bytes()
     assert (install / "_internal/new.dll").exists()
-    assert not (install / "_internal/gone.dll").exists()      # 删除清单生效
-    assert (install / "config" / "config.json").exists()      # 用户数据不动
+    assert not (install / "_internal/gone.dll").exists()      # delete list applied
+    assert (install / "config" / "config.json").exists()      # user data untouched
 
 
 def test_apply_delta_reports_base_mismatch(tmp_path):
@@ -136,14 +136,14 @@ def test_apply_delta_reports_base_mismatch(tmp_path):
 
     result = payload.apply_delta(install, out)
     assert not result.success
-    assert result.base_mismatch          # 调用方据此回退整包
-    # 失败时不能留下垃圾目录
+    assert result.base_mismatch          # caller falls back to the full package based on this
+    # a failure must not leave stray directories
     leftovers = list(tmp_path.glob(".MaaAuto_new_*")) + list(tmp_path.glob(".MaaAuto_bak_*"))
     assert leftovers == []
 
 
 # --------------------------------------------------------------------------- #
-# 资产选择
+# asset selection
 # --------------------------------------------------------------------------- #
 def _release(assets):
     return {"tag_name": "v1.2.0", "assets": assets}
@@ -156,7 +156,7 @@ def test_pick_delta_asset_matches_exact_pair():
     ]
     got = payload.pick_delta_asset(_release(assets), "1.1.1", "1.2.0")
     assert got and got["browser_download_url"] == "d"
-    # 版本对不上就没有
+    # no match when the versions do not line up
     assert payload.pick_delta_asset(_release(assets), "1.0.0", "1.2.0") is None
     assert payload.pick_delta_asset(_release(assets), "0.0.0", "1.2.0") is None
 
@@ -194,7 +194,7 @@ def test_check_update_without_delta_still_works(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 跳版本：串行差分链
+# skipping versions: serial delta chain
 # --------------------------------------------------------------------------- #
 def _asset(name, size=100):
     return {"name": name, "browser_download_url": "http://x/" + name,
@@ -209,12 +209,12 @@ def test_collect_delta_edges_from_releases():
         {"tag_name": "v1.3.0", "assets": [
             _asset("MaaAuto_delta_v1.2.0_to_1.3.0.zip")]},
         {"tag_name": "v1.2.0", "draft": True, "assets": [
-            _asset("MaaAuto_delta_v1.1.0_to_1.2.0.zip")]},   # draft 要忽略
+            _asset("MaaAuto_delta_v1.1.0_to_1.2.0.zip")]},   # draft, must be ignored
     ]
     edges = payload.collect_delta_edges(releases)
     assert "1.2.0" in edges and "1.3.0" in edges["1.2.0"]
     assert "1.3.0" in edges and "1.4.0" in edges["1.3.0"]
-    assert "1.1.0" not in edges          # draft 不算
+    assert "1.1.0" not in edges          # draft does not count
 
 
 def test_find_delta_chain_multi_hop():
@@ -236,7 +236,7 @@ def test_find_delta_chain_no_path_or_too_many_hops():
 
 
 def test_apply_delta_chain_two_steps(tmp_path):
-    """装的是 A，链式打 A→B、B→C，结果必须与 C 完全一致。"""
+    """A is installed, then A->B and B->C are applied; the result must match C exactly."""
     a = tmp_path / "a"
     b = tmp_path / "b"
     c = tmp_path / "c"
@@ -282,5 +282,5 @@ def test_apply_delta_chain_reports_mismatch_without_touching_install(tmp_path):
 
     result = payload.apply_delta_chain(install, [d_ab])
     assert not result.success and result.base_mismatch
-    # 安装目录一个字节都不能被改
+    # not a single byte of the install dir may change
     assert (install / "MaaAuto.exe").read_bytes() == b"tampered"

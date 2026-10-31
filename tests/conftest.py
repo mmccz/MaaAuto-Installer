@@ -1,6 +1,7 @@
-"""pytest 公共配置：把 MaaAutoInstaller 加进 import 路径。
+"""Shared pytest configuration: put MaaAutoInstaller on the import path.
 
-安装器/升级器的 core 层不依赖 Qt，所以这些测试跑得很快，也不需要图形环境。
+The installer/updater core layer does not depend on Qt, so these tests run quickly
+and need no graphical environment.
 """
 
 import os

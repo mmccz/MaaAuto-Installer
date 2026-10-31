@@ -1,10 +1,11 @@
 ; ============================================================================
-; MaaAuto 在线引导包（约 2 MB，不内嵌 payload）
+; MaaAuto online bootstrap stub (about 2 MB, no embedded payload)
 ;
-; 只做一件事：从 GitHub Release 下载完整安装包（带 SHA256 校验），
-; 下载完成后交给它继续走向导。安装逻辑全部在完整包里，这里不复制一份。
+; It does one thing only: download the full installer from the GitHub Release
+; (with SHA256 verification) and then hand over to its wizard. All install
+; logic lives in the full package; nothing is duplicated here.
 ;
-; build_release.py 通过 /D 传入 MySetupUrl 与 MySetupSha256。
+; build_release.py passes MySetupUrl and MySetupSha256 through /D.
 ; ============================================================================
 
 #ifndef MyAppVersion

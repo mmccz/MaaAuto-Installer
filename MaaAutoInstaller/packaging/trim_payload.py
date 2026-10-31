@@ -1,16 +1,18 @@
-"""裁剪 payload：删除运行期用不到的 Qt / OpenCV 组件。
+"""Trim the payload: drop the Qt / OpenCV components unused at runtime.
 
-只做「删文件」，不改任何配置。默认 dry-run，加 ``--apply`` 才真正删除。
+Only deletes files, never touches any config. Dry-run by default; pass
+``--apply`` to actually delete.
 
-规则来自实测（PySide6 6.11 / OpenCV 5.0）：widgets 应用不需要 Quick/Qml/Pdf/
-VirtualKeyboard，截图找图不需要 cv2 的 videoio ffmpeg 后端。
+The rules come from measurement (PySide6 6.11 / OpenCV 5.0): a widgets app does
+not need Quick/Qml/Pdf/VirtualKeyboard, and screenshot matching does not need
+the cv2 videoio ffmpeg backend.
 """
 
 import argparse
 import shutil
 from pathlib import Path
 
-# (相对 payload 根的 glob, 说明)
+# (glob relative to the payload root, description)
 TRIM_RULES = [
     ("_internal/PySide6/Qt6Quick*.dll", "Qt Quick"),
     ("_internal/PySide6/Qt6Qml*.dll", "Qt QML"),
@@ -29,7 +31,7 @@ def _human(n: int) -> str:
 
 
 def collect(payload_dir: Path):
-    """返回 [(path, size, note)]。"""
+    """Return [(path, size, note)]."""
     hits = []
     for pattern, note in TRIM_RULES:
         for p in payload_dir.glob(pattern):
@@ -66,7 +68,7 @@ def main() -> int:
         except Exception as e:
             print(f"[warn] 删除失败 {path.name}: {e}")
 
-    # 清掉空的 plugins 子目录不影响运行，这里不动
+    # Removing the empty plugins subdirectories does not affect runtime; left alone
     remaining = sum(f.stat().st_size for f in payload.rglob("*") if f.is_file())
     print(f"裁剪完成，payload 现为 {_human(remaining)}")
     return 0

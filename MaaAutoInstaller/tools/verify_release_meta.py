@@ -1,16 +1,16 @@
-"""发布后元数据验证：Release 状态 / 资产 digest / 在线公告源。
+"""Post-release metadata verification: Release state / asset digests / online announcement sources.
 
-用法::
+Usage ::
 
     python MaaAutoInstaller/tools/verify_release_meta.py 1.1.0
 
-不下载大文件，只用 GitHub API 校验：
-  1. Release 已发布（非 draft / 非 prerelease）、`releases/latest` 指向它；
-  2. 发布说明（RELEASE_NOTES.md）已上传且包含「先改这两处」；
-  3. 4 个资产齐全，`SHA256SUMS.txt` 与 GitHub 计算的 `sha256:` digest 逐项一致；
-  4. 在线公告源（raw.githubusercontent + jsDelivr）可访问且含该版本条目。
+Downloads nothing large; validates through the GitHub API only:
+  1. the Release is published (not draft / not prerelease) and `releases/latest` points at it;
+  2. release notes (RELEASE_NOTES.md) uploaded and containing the two mandatory settings;
+  3. all 4 assets present, `SHA256SUMS.txt` matching GitHub's computed `sha256:` digest item by item;
+  4. online announcement sources (raw.githubusercontent + jsDelivr) reachable and containing this version.
 
-如需验证「包能装」，再跑 tools/verify_release.py <version>（会真装一次）。
+To verify "the package actually installs", also run tools/verify_release.py <version> (it does a real install).
 """
 
 import json
@@ -91,7 +91,7 @@ for line in sums_path.read_text(encoding="utf-8").splitlines():
     if line.strip():
         digest, name = line.split()
         sums[name] = digest
-# 3 个固定产物 + 可选的差分包
+# 3 fixed artifacts + optional delta package
 check("SHA256SUMS 含 3~4 个产物", 3 <= len(sums) <= 4, str(list(sums)))
 check("差分包已写入 SHA256SUMS",
       all(n in sums for n in delta_names) if delta_names else True,
@@ -114,7 +114,7 @@ for url in (
 ):
     host = url.split("/")[2]
     err = ""
-    for _ in range(3):                      # 这台机器访问 raw 偶发超时，重试几次
+    for _ in range(3):                      # raw hits occasionally time out here; retry a few times
         try:
             d = http_json(url)
             items = d.get("items") or []

@@ -1,12 +1,12 @@
 """
-.mmaaauto.json 读写。
-这个文件是安装器与升级器之间的契约。
+Read/write .maaauto.json.
+This file is the contract between the installer and the updater.
 
-MANIFEST_VERSION 历史：
-  1 → 初始版本
-  2 → 加 requirements_hash / mirror
-  3 → 加 release_channel / last_checked_at / last_upgrade_from / source_hash
-      （2026-09 与 MaaAutoProject 冻结）
+MANIFEST_VERSION history:
+  1 -> initial version
+  2 -> added requirements_hash / mirror
+  3 -> added release_channel / last_checked_at / last_upgrade_from / source_hash
+      (frozen with MaaAutoProject in 2026-09)
 """
 
 import json
@@ -22,32 +22,32 @@ MANIFEST_VERSION = 3
 
 @dataclass
 class Manifest:
-    # ---- 版本 ----
-    version: str = "0.0.0"              # MaaAuto 主程序版本
-    installer_version: str = "0.0.0"    # 安装器/升级器版本
+    # ---- versions ----
+    version: str = "0.0.0"              # MaaAuto main app version
+    installer_version: str = "0.0.0"    # installer/updater version
     manifest_version: int = MANIFEST_VERSION
 
-    # ---- 路径 ----
+    # ---- paths ----
     install_dir: str = ""
     app_exe: str = ""                   # <install>/MaaAuto.exe
     uninstall_exe: str = ""             # <install>/uninstall.exe
     upgrade_exe: str = ""               # <install>/upgrade.exe
 
-    # ---- 依赖信息 ----
-    requirements_hash: str = ""         # requirements.txt 的 sha256
-    mirror: str = ""                    # 安装时使用的 PyPI 镜像 key
+    # ---- dependency info ----
+    requirements_hash: str = ""         # sha256 of requirements.txt
+    mirror: str = ""                    # PyPI mirror key used at install time
 
-    # ---- 时间 ----
+    # ---- timestamps ----
     installed_at: str = ""
     updated_at: str = ""
 
-    # ---- 升级相关（v3 新增）----
+    # ---- upgrade-related (added in v3) ----
     release_channel: str = "stable"     # stable / beta
-    last_checked_at: str = ""           # 上次检查更新时间
-    last_upgrade_from: str = ""         # 上次升级前版本
-    source_hash: str = ""               # 当前版本对应的 MaaAuto_Source.zip sha256
+    last_checked_at: str = ""           # last update check time
+    last_upgrade_from: str = ""         # version before the last upgrade
+    source_hash: str = ""               # sha256 of MaaAuto_Source.zip for this version
 
-    # ---- 预留 ----
+    # ---- reserved ----
     extra: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #

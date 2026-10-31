@@ -1,20 +1,24 @@
-"""安装/卸载 smoke：静默安装 → 校验产物与 manifest → 静默卸载 → 确认清空。
+"""Install/uninstall smoke: silent install -> verify artifacts and manifest
+-> silent uninstall -> confirm nothing is left.
 
-与 ``verify_release.py`` 的区别：那个是**完整**验证（升级链路、假 Release、
-开始菜单任务、数据保留…），本机手动跑；这个只保留发布前必须过的核心断言，
-几分钟内跑完，供 ``release.yml`` 在「构建完成、发布 Release 之前」调用：
+Difference from ``verify_release.py``: that one is the **full** verification
+(upgrade path, fake Release, Start menu tasks, data retention...), run manually
+on a dev machine; this one keeps only the core assertions that must pass before
+release, finishes in a few minutes, and is called by ``release.yml`` between
+"build finished" and "publish the Release":
 
-* 安装包装不上、manifest 写错、产物缺失、卸载残留 → 直接红在发布之前，
-  不会把一个装不上的版本发出去；
-* 不联网、不启动主程序（主程序要求管理员，CI 里弹 UAC 会挂），因此可安全跑在 runner。
+* installer will not install, manifest written wrong, artifact missing, uninstall
+  leftovers -> red before publishing, so a broken version never ships;
+* no network, no main app launch (the app requires admin, and a UAC prompt hangs
+  CI), so it is safe to run on a runner.
 
-用法（安装器仓库根目录）::
+Usage (from the installer repo root) ::
 
     python MaaAutoInstaller/tools/smoke_install.py 1.1.1
     python MaaAutoInstaller/tools/smoke_install.py v1.1.1 --keep
     python MaaAutoInstaller/tools/smoke_install.py --setup dist/MaaAuto_Setup_v1.1.1-Windows-x64.exe
 
-退出码：0 = 全部通过；1 = 有断言失败或异常。
+Exit code: 0 = everything passed; 1 = an assertion failed or an exception occurred.
 """
 
 import argparse
@@ -28,7 +32,7 @@ import tempfile
 import time
 from pathlib import Path
 
-# CI（cp1252 控制台）打印中文会崩，统一 UTF-8
+# Printing non-ASCII text crashes CI's cp1252 console; force UTF-8
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -39,12 +43,14 @@ HERE = Path(__file__).resolve().parent          # MaaAutoInstaller/tools/
 INSTALLER_ROOT = HERE.parent.parent             # MaaAuto-Installer/
 INSTALLER_PKG = HERE.parent                     # MaaAutoInstaller/
 DIST = INSTALLER_ROOT / "dist"
-sys.path.insert(0, str(INSTALLER_PKG))   # MaaAutoInstaller/，包名叫 installer
+sys.path.insert(0, str(INSTALLER_PKG))   # MaaAutoInstaller/, package name is installer
 from installer.core import shell_integration as shell  # noqa: E402
 
-# 必须装在**独立目录**：Inno 的卸载注册表项 / 开始菜单组 / 桌面快捷方式按 AppId
-# 全局共享，装在用户的正式安装目录（甚至用户自选的 D:\MaaAuto）上再卸载，会把
-# 用户那份的登记信息一起删掉（1.4.1 踩过：「设置→应用」变成「系统找不到应用」）。
+# Must install into a **separate directory**: Inno's uninstall registry key, Start
+# menu group and desktop shortcut are shared globally by AppId, so installing over
+# the user's real install dir (even a custom D:\MaaAuto) and then uninstalling
+# deletes the user's registration too (hit in 1.4.1: "Settings > Apps" turned into
+# "the system cannot find the app").
 DEFAULT_DIR = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) \
     / "Programs" / "MaaAuto_verify"
 START_MENU = shell.start_menu_group()
@@ -79,9 +85,11 @@ def run(cmd, timeout=600):
 
 
 def uninstaller_alive():
-    """Inno 卸载器会把自己复制到临时目录再执行，原进程秒退。
+    """Inno's uninstaller copies itself to a temp dir and exits its original
+    process immediately.
 
-    所以要等这些副本进程（unins* / _iu*）退出，否则会误判「卸载完了」。
+    So wait for those copies (unins* / _iu*) to exit, otherwise "uninstall done"
+    is reported too early.
     """
     try:
         import psutil
@@ -104,12 +112,12 @@ def wait_gone(path, timeout=180):
 
 
 def contract_extra():
-    """安装器侧契约默认值；导入失败时返回空 dict（对应断言会失败）。"""
+    """Installer-side contract defaults; {} if the import fails (the assertion then fails)."""
     sys.path.insert(0, str(INSTALLER_PKG))
     try:
         from installer.contract import default_manifest_extra
         return default_manifest_extra()
-    except Exception as e:                       # 不应发生：同仓库同目录
+    except Exception as e:                       # should not happen: same repo, same dir
         print(f"  ! 读取 contract.py 失败: {e}", flush=True)
         return {}
 
@@ -181,13 +189,13 @@ def main():
               listed.get(setup.name) == sha256_of(setup),
               f"sums={listed.get(setup.name)} actual={sha256_of(setup)}")
 
-    # Low IL / 沙箱目录下 Inno 建临时目录会失败（错误 5），复制到 TEMP 再跑
+    # Inno cannot create its temp dir under Low IL / sandbox (error 5); copy to TEMP and run
     tmp_root = Path(tempfile.mkdtemp(prefix="maa_smoke_"))
     local_setup = tmp_root / setup.name
     shutil.copy2(setup, local_setup)
 
     print(f"[2] 静默安装 → {app_dir}", flush=True)
-    # 清掉上次残留，否则「安装成功」可能是在看旧目录
+    # Clear leftovers; otherwise "install succeeded" may be inspecting the old dir
     if app_dir.exists():
         shutil.rmtree(app_dir, ignore_errors=True)
         time.sleep(0.5)
@@ -204,7 +212,7 @@ def main():
     check("升级器在（自动升级依赖）", (app_dir / "upgrade.exe").exists())
     check("卸载器在", (app_dir / "unins000.exe").exists())
     check("_internal 已解包", (app_dir / "_internal").is_dir())
-    # /MERGETASKS=!startmenuicon 必须生效，否则用户开始菜单会被塞快捷方式
+    # /MERGETASKS=!startmenuicon must take effect, otherwise the user's Start menu gets shortcuts
     check("未创建开始菜单（任务参数生效）", not shell.start_menu_files(), str(START_MENU))
 
     manifest_path = app_dir / ".maaauto.json"

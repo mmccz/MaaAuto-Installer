@@ -1,30 +1,38 @@
-"""安装「外壳集成」的备份 / 还原 / 修复。
+"""Backup / restore / repair for the installer "shell integration".
 
-为什么要这个东西（1.4.2 的教训）
---------------------------------
-Inno 安装包有三样东西是**按 AppId 全局共享**的，跟装在哪个目录无关：
+Why this exists (the 1.4.2 lesson)
+---------------------------------
+Three things an Inno installer writes are **shared globally by AppId**,
+regardless of the install directory:
 
 * ``HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{AppId}_is1``
-  （「设置 → 应用」里那条记录，Windows 靠它找卸载器）
-* 开始菜单组 ``%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\MaaAuto``
-* 桌面 ``MaaAuto.lnk``
+  (the row in "Settings -> Apps"; Windows uses it to find the uninstaller)
+* the Start Menu group ``%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\MaaAuto``
+* the desktop link ``MaaAuto.lnk``
 
-本地发布校验脚本（``tools/verify_release.py``、``tools/smoke_install.py``）会
-「装一份 → 跑测试 → 卸载」。它们装在 ``%LOCALAPPDATA%\\Programs\\MaaAuto``，
-而用户可能把正式版装在 ``D:\\MaaAuto`` 之类的自定义目录——**AppId 相同**，
-于是校验脚本的卸载会把用户那份的注册表项和开始菜单组一起删掉：
+The local release-verification scripts (``tools/verify_release.py``,
+``tools/smoke_install.py``) do "install a copy -> run tests -> uninstall". They
+install to ``%LOCALAPPDATA%\\Programs\\MaaAuto`` while the user may have the real
+thing in a custom directory such as ``D:\\MaaAuto`` -- **same AppId** -- so the
+verification uninstall deletes the user's registry entry and Start Menu group
+along with its own:
 
-* 「设置 → 应用」里的 MaaAuto 变成「系统找不到应用」（UninstallString 指向已删除的 exe）
-* 开始菜单 / 桌面快捷方式消失
+* MaaAuto in "Settings -> Apps" turns into "app not found" (UninstallString
+  points at a deleted exe)
+* the Start Menu / desktop shortcuts disappear
 
-程序文件其实没被动过（自动升级只替换文件），坏掉的只是这些**登记信息**。
+The program files themselves are untouched (the auto-updater only replaces
+files); only this **bookkeeping** breaks.
 
-所以校验脚本现在必须：
+So the verification scripts must now:
 
-1. 装到**独立目录**（``MaaAuto_verify``），不碰用户目录；
-2. 开跑前 ``snapshot()`` 备份注册表项 + 快捷方式，结束后 ``restore()`` 还原。
+1. install to a **separate directory** (``MaaAuto_verify``) and never touch the
+   user's install;
+2. call ``snapshot()`` before and ``restore()`` after to back up and restore the
+   registry entry and shortcuts.
 
-``repair_integration()`` 用来给已经被误删的机器重建这些登记信息。
+``repair_integration()`` rebuilds this bookkeeping on machines where it was
+already deleted by mistake.
 """
 
 import base64
@@ -37,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# 与 packaging/installer.iss 的 AppId 保持一致（改这里必须同步 .iss）
+# Keep in sync with the AppId in packaging/installer.iss (changing this requires the same .iss change)
 APP_ID = "{6F3A2C1E-8B4D-4E7A-9C15-3D02A7B9E4C1}"
 APP_NAME = "MaaAuto"
 UNINSTALL_KEY = f"{APP_ID}_is1"
@@ -48,7 +56,7 @@ UNINSTALLER_EXE = "unins000.exe"
 
 
 # --------------------------------------------------------------------------- #
-# 路径
+# Paths
 # --------------------------------------------------------------------------- #
 def uninstall_key_path() -> str:
     return f"{UNINSTALL_ROOT}\\{UNINSTALL_KEY}"
@@ -61,35 +69,37 @@ def start_menu_group() -> Path:
 
 
 def desktop_lnk() -> Path:
-    # Inno 的 {autodesktop} 在 per-user 安装下就是当前用户桌面
+    # For per-user installs the Inno {autodesktop} constant is the current user desktop
     desktop = Path(os.environ.get("USERPROFILE") or str(Path.home())) / "Desktop"
     return desktop / f"{APP_NAME}.lnk"
 
 
 # --------------------------------------------------------------------------- #
-# Microsoft Store 版 Python 的 MSIX 目录重定向
+# MSIX directory redirection for Microsoft Store Python
 # --------------------------------------------------------------------------- #
 def packaged_python() -> bool:
-    """解释器是否来自 Microsoft Store（MSIX 打包应用）。
+    """Whether the interpreter comes from the Microsoft Store (an MSIX-packaged app).
 
-    MSIX 应用写 ``%APPDATA%`` 会被静默重定向到
-    ``%LOCALAPPDATA%\\Packages\\<包>\\LocalCache\\Roaming``，Explorer / Inno 都看不到。
-    于是「修复开始菜单」会报 OK、实际什么也没建出来（1.4.2 修复后复测踩到）。
+    MSIX app writes to ``%APPDATA%`` are silently redirected to
+    ``%LOCALAPPDATA%\\Packages\\<package>\\LocalCache\\Roaming``, which neither
+    Explorer nor Inno can see. So "repair Start Menu" reports OK while creating
+    nothing at all (hit while retesting the 1.4.2 fix).
 
-    子进程（powershell.exe）不继承包身份，写的是真实路径，所以这类路径的
-    读写统一交给 PowerShell 做。
+    Child processes (powershell.exe) do not inherit the package identity and
+    write to the real path, so reads and writes of such paths are delegated to
+    PowerShell.
     """
     prefix = str(getattr(sys, "prefix", "")).replace("/", "\\").lower()
     return "\\windowsapps\\" in prefix
 
 
 def _ps_literal(text: object) -> str:
-    """包成 PowerShell 单引号字符串（单引号自身翻倍）。"""
+    """Wrap as a PowerShell single-quoted string (single quotes doubled)."""
     return "'" + str(text).replace("'", "''") + "'"
 
 
 def _ps(script: str) -> Optional[str]:
-    """跑一段 PowerShell；成功返回 stdout，失败/不可用返回 None。"""
+    """Run a PowerShell snippet; return stdout on success, None on failure/unavailable."""
     if os.name != "nt":
         return None
     exe = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell"
@@ -132,7 +142,7 @@ def _read_group_via_ps(group: Path) -> Dict[str, bytes]:
 
 
 def _write_group_via_ps(group: Path, files: Dict[str, bytes]) -> bool:
-    """用 PowerShell 重建开始菜单组（先整个删掉，再按字节写回）。"""
+    """Rebuild the Start Menu group via PowerShell (delete it entirely first, then write the bytes back)."""
     parts = [
         f"$root = {_ps_literal(str(group))};",
         "if (Test-Path -LiteralPath $root) {"
@@ -150,7 +160,7 @@ def _write_group_via_ps(group: Path, files: Dict[str, bytes]) -> bool:
 
 
 def start_menu_files() -> Dict[str, bytes]:
-    """开始菜单组里的文件（相对路径 → 原始字节），空组/不存在返回 {}。"""
+    """Files in the Start Menu group (relative path -> raw bytes); {} when empty or missing."""
     if packaged_python():
         return _read_group_via_ps(start_menu_group())
     group = start_menu_group()
@@ -166,7 +176,7 @@ def start_menu_files() -> Dict[str, bytes]:
 
 
 def clear_start_menu_group() -> None:
-    """删掉开始菜单组（真实路径；MSIX 下不能直接 rmtree）。"""
+    """Delete the Start Menu group (real path; a plain rmtree does not work under MSIX)."""
     group = start_menu_group()
     if packaged_python():
         _ps("if (Test-Path -LiteralPath %s) { Remove-Item -LiteralPath %s"
@@ -178,10 +188,10 @@ def clear_start_menu_group() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 注册表：整个键读成 (name, value, type) 三元组，方便原样写回
+# Registry: read the whole key as (name, value, type) triples so it can be written back verbatim
 # --------------------------------------------------------------------------- #
 def read_uninstall_key() -> Optional[List[Tuple[str, object, int]]]:
-    """读当前用户的 MaaAuto 卸载项；不存在返回 None。"""
+    """Read the current user MaaAuto uninstall entry; None when absent."""
     try:
         import winreg
     except Exception:
@@ -219,7 +229,7 @@ def delete_uninstall_key() -> None:
 
 
 def installed_location() -> Optional[Path]:
-    """注册表里登记的安装目录（没有就 None）。"""
+    """Install directory recorded in the registry (None when missing)."""
     items = read_uninstall_key() or []
     for name, value, _kind in items:
         if name.lower() in ("installlocation", "inno setup: app path"):
@@ -230,9 +240,10 @@ def installed_location() -> Optional[Path]:
 
 
 def foreign_install(target_dir: Path) -> Optional[Path]:
-    """注册表里登记的是「另一份安装」时返回那个目录。
+    """Return that directory when the registry records a "different install".
 
-    校验脚本用它提醒：接下来动的是共享的注册表项和快捷方式。
+    The verification scripts use it to warn that the shared registry entry and
+    shortcuts are about to be touched.
     """
     loc = installed_location()
     try:
@@ -250,15 +261,15 @@ def foreign_install(target_dir: Path) -> Optional[Path]:
 
 
 # --------------------------------------------------------------------------- #
-# 快照 / 还原
+# Snapshot / restore
 # --------------------------------------------------------------------------- #
 @dataclass
 class IntegrationSnapshot:
-    """外壳集成状态快照（注册表值 + 快捷方式原始字节）。"""
+    """Shell-integration state snapshot (registry values + raw shortcut bytes)."""
     key_items: Optional[List[Tuple[str, object, int]]] = None
     group_files: Dict[str, bytes] = field(default_factory=dict)
     desktop_link: Optional[bytes] = None
-    # 备份的临时目录（复制快捷方式用，必须在 restore 里清掉）
+    # temp dir for the backup (used to copy shortcuts, must be cleaned up in restore)
     _tmp: Optional[Path] = None
 
     def summary(self) -> str:
@@ -274,7 +285,7 @@ class IntegrationSnapshot:
 
 def snapshot() -> IntegrationSnapshot:
     snap = IntegrationSnapshot(key_items=read_uninstall_key())
-    # 开始菜单组用 start_menu_files()：MSIX Python 下必须走 PowerShell 才看得见真实目录
+    # Start Menu group goes through start_menu_files(): under MSIX Python only PowerShell sees the real directory
     snap.group_files = start_menu_files()
     lnk = desktop_lnk()
     if lnk.is_file():
@@ -286,14 +297,16 @@ def snapshot() -> IntegrationSnapshot:
 
 
 def restore(snap: IntegrationSnapshot) -> str:
-    """把快照写回去；返回人类可读的还原摘要。"""
+    """Write the snapshot back; return a human-readable restore summary."""
     actions = []
 
-    # 注册表
+    # Registry
     if snap.key_items is None:
-        # 快照时没有登记：正常情况下要删掉校验过程写进去的那条。
-        # 但如果登记的安装目录还在（程序文件也在），说明这是用户的正式安装，
-        # 宁可留一条多余登记也不能再删一次（1.4.1 事故就是这么来的）。
+        # Nothing was registered at snapshot time: normally the entry written by
+        # the verification run should be deleted. But if the recorded install
+        # directory still exists (program files too), this is the user's real
+        # install: better to leave a redundant entry than to delete it again
+        # (that is exactly what went wrong in 1.4.1).
         loc = installed_location()
         if loc is not None and (loc / MAIN_EXE).exists():
             actions.append(f"保留现有登记（{loc} 仍在），未删除")
@@ -304,10 +317,10 @@ def restore(snap: IntegrationSnapshot) -> str:
         write_uninstall_key(snap.key_items)
         actions.append(f"还原注册表项（{len(snap.key_items)} 个值）")
 
-    # 开始菜单：先删掉校验过程留下的，再按快照重建
+    # Start Menu: delete what the verification run left behind, then rebuild from the snapshot
     group = start_menu_group()
     if packaged_python():
-        # MSIX 重定向会让 write_bytes 写进 LocalCache，必须借 PowerShell 落真实路径
+        # MSIX redirection would send write_bytes into LocalCache, so PowerShell must write the real path
         if _write_group_via_ps(group, snap.group_files):
             if snap.group_files:
                 actions.append(f"还原开始菜单（{len(snap.group_files)} 个文件）")
@@ -325,7 +338,7 @@ def restore(snap: IntegrationSnapshot) -> str:
                 target.write_bytes(data)
             actions.append(f"还原开始菜单（{len(snap.group_files)} 个文件）")
 
-    # 桌面
+    # Desktop
     lnk = desktop_lnk()
     if snap.desktop_link:
         lnk.parent.mkdir(parents=True, exist_ok=True)
@@ -342,11 +355,11 @@ def restore(snap: IntegrationSnapshot) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 修复（给被误删登记的机器用）
+# Repair (for machines whose entries were deleted by mistake)
 # --------------------------------------------------------------------------- #
 def _write_lnk_via_ps(path: Path, target: Path, workdir: Path,
                       description: str = "") -> bool:
-    """在**真实**路径建 .lnk（绕开 MSIX 的 %APPDATA% 重定向）。"""
+    """Create a .lnk on the **real** path (bypassing the MSIX %APPDATA% redirection)."""
     script = (
         "$sh = New-Object -ComObject WScript.Shell;"
         f"$lnk = $sh.CreateShortcut({_ps_literal(path)});"
@@ -364,7 +377,7 @@ def _write_lnk_via_ps(path: Path, target: Path, workdir: Path,
 
 
 def _write_lnk(path: Path, target: Path, workdir: Path, description: str = "") -> bool:
-    """用 WScript.Shell 建 .lnk（pywin32 不在装机依赖里，这里按需导入）。"""
+    """Create a .lnk via WScript.Shell (pywin32 is not a deployment dependency, imported on demand)."""
     if packaged_python():
         return _write_lnk_via_ps(path, target, workdir, description)
     try:
@@ -397,9 +410,10 @@ def _dir_size_kb(root: Path) -> int:
 
 
 def repair_integration(install_dir: Path, version: str = "") -> Dict[str, bool]:
-    """为 ``install_dir`` 重建卸载注册表项、开始菜单组与桌面快捷方式。
+    """Rebuild the uninstall registry entry, Start Menu group and desktop shortcut for ``install_dir``.
 
-    只补齐/覆盖，不删除任何程序文件；用于修复「升级后图标和『应用』条目消失」。
+    Add/overwrite only, never delete program files; used to repair "icons and the
+    Apps entry vanished after an upgrade".
     """
     import time
 

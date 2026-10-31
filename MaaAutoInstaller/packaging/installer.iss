@@ -1,12 +1,12 @@
 ; ============================================================================
-; MaaAuto 完整安装包（Inno Setup 6.5+）
+; MaaAuto full installer (Inno Setup 6.5+)
 ;
-; 由 build_release.py 调用，通过 /D 传入：
+; Invoked by build_release.py, which passes in through /D:
 ;   MyAppVersion / MyInstallerVersion / MyUpdateApi
 ;   MyPayloadPrefix / MyMinInstaller / MyPayloadDir / MyOutputDir
 ;   MyIcon / MySetupBase
 ;
-; 语言文件：Inno Setup 官方 issrc 仓库的 ChineseSimplified.isl
+; Language files: ChineseSimplified.isl from the official Inno Setup issrc repo
 ; ============================================================================
 
 #ifndef MyAppVersion
@@ -36,7 +36,7 @@
 #ifndef MySetupBase
   #define MySetupBase "MaaAuto_Setup_v" + MyAppVersion + "-Windows-x64"
 #endif
-; Inno 的 VersionInfoVersion 只接受纯数字，预发布版本需要把 b1/rc1 剥掉
+; Inno VersionInfoVersion accepts digits only, so prerelease b1/rc1 must be stripped
 #ifndef MyVersionQuad
   #define MyVersionQuad "0.0.0.0"
 #endif
@@ -81,8 +81,9 @@ cn.CreateStartMenuIcon=创建开始菜单快捷方式
 en.CreateStartMenuIcon=Create a Start Menu shortcut
 
 [Tasks]
-; 开始菜单快捷方式做成可选项（1.0.6）：有些用户只用桌面图标/任务栏，不想被塞
-; 开始菜单条目；默认勾选，保持老用户升级后的行为不变。
+; The Start Menu shortcut is optional (1.0.6): some users only use a desktop
+; icon / taskbar and do not want a Start Menu entry; checked by default so
+; existing users see no behaviour change after upgrading.
 Name: "startmenuicon"; Description: "{cm:CreateStartMenuIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
@@ -94,19 +95,22 @@ Name: "{group}\MaaAuto"; Filename: "{app}\MaaAuto.exe"; Tasks: startmenuicon
 Name: "{group}\{cm:UninstallProgram,MaaAuto}"; Filename: "{uninstallexe}"; Tasks: startmenuicon
 Name: "{autodesktop}\MaaAuto"; Filename: "{app}\MaaAuto.exe"; Tasks: desktopicon
 
-; 卸载时兜底清掉开始菜单组。
+; Best-effort cleanup of the Start Menu group on uninstall.
 ;
-; 实测（1.0.5 验证）：卸载器会删掉「卸载 MaaAuto」快捷方式，却经常把
-; 「MaaAuto.lnk」和整个组目录留下（Inno 自己的卸载记录没能清掉，尤其是先升级
-; 再卸载、或外壳正持有该目录句柄时）。这台机器上它过了几分钟才被系统回收，
-; 用户当场看就是「卸载没干净」。直接 filesandordirs 删整个 {group} 目录，
-; 反正这个目录只属于本程序。
+; Measured (verified on 1.0.5): the uninstaller deletes the "Uninstall MaaAuto"
+; shortcut but often leaves "MaaAuto.lnk" and the whole group directory behind
+; (the Inno uninstall log does not clear them, especially when upgrading first
+; and uninstalling later, or while the shell holds a handle on that directory).
+; On this machine the system took minutes to reclaim it, which the user sees as
+; "uninstall left junk". Just delete the entire {group} directory with
+; filesandordirs -- that directory belongs to this program only.
 [UninstallDelete]
 Type: filesandordirs; Name: "{group}"
 
 [Run]
-; shellexec 必需：主程序 manifest 要求管理员，用 CreateProcess 直接起会报
-; 「错误代码 740，请求的操作需要提升」。ShellExecute 会走 UAC。
+; shellexec is required: the main app manifest demands administrator, and
+; starting it directly with CreateProcess fails with "error 740, the requested
+; operation requires elevation". ShellExecute goes through UAC.
 Filename: "{app}\MaaAuto.exe"; Description: "{cm:LaunchProgram,MaaAuto}"; Flags: nowait postinstall skipifsilent shellexec
 
 [Code]
@@ -117,7 +121,7 @@ begin
   Dir := ExpandConstant('{app}');
   DirEsc := Dir;
   StringChangeEx(DirEsc, '\', '\\', True);
-  { Inno 的卸载器固定叫 unins000.exe（不支持重命名），这里写真实路径 }
+  { The Inno uninstaller is always named unins000.exe (renaming is not supported), so write the real path }
   UninstEsc := ExpandConstant('{uninstallexe}');
   StringChangeEx(UninstEsc, '\', '\\', True);
   InstalledAt := GetDateTimeString('yyyy-mm-dd hh:nn:ss', #0, #0);
@@ -155,8 +159,9 @@ begin
            mbError, MB_OK);
 end;
 
-{ 2.x 用 RUNASADMIN 兼容标志提权；3.0 改为 exe 内嵌 manifest。
-  这里清理老版本可能残留的注册表项，避免重复提示。 }
+{ 2.x elevated through the RUNASADMIN compatibility flag; 3.0 embeds the
+  manifest in the exe instead. Clear registry leftovers from old versions here
+  to avoid repeated prompts. }
 procedure CleanLegacyRegistry();
 var
   ExePath: String;
@@ -177,8 +182,9 @@ begin
   end;
 end;
 
-{ MaaAuto.exe 是否还在运行。
-  卸载器有 ParamStr 但没有进程 API，这里用 tasklist + find 的退出码判断。 }
+{ Whether MaaAuto.exe is still running.
+  The uninstaller has ParamStr but no process API, so use the tasklist + find
+  exit code. }
 function IsAppRunning(): Boolean;
 var
   ResultCode: Integer;
@@ -190,14 +196,16 @@ begin
     Result := (ResultCode = 0);
 end;
 
-{ 让正在运行的主程序优雅退出。
+{ Ask the running main app to exit gracefully.
 
-为什么要用 .upgrading 握手而不是直接 taskkill：
-本安装包默认 per-user、卸载器**不提权**，而主程序 exe 的清单要求管理员。
-低完整性进程 kill 不掉高完整性进程（taskkill 返回「拒绝访问」），
-文件就删不干净——这正是用户反馈「卸载后还剩一堆东西」。
-主程序每秒轮询 config\.upgrading，写这个文件它就会保存配置后自己退出，
-既不需要 UAC，也不会留下半截状态。 }
+Why use the .upgrading handshake instead of a plain taskkill:
+this installer is per-user by default and the uninstaller does **not** elevate,
+while the main exe manifest requires administrator. A low-integrity process
+cannot kill a high-integrity one (taskkill returns "access denied") and the
+files cannot be removed cleanly -- exactly the "uninstall still leaves lots of
+stuff" users reported. The main app polls config\.upgrading every second;
+writing this file makes it save config and exit by itself, with no UAC and no
+half-written state. }
 function AskAppToExit(TimeoutMs: Integer): Boolean;
 var
   FlagPath: String;
@@ -228,9 +236,10 @@ begin
   begin
     CleanLegacyRegistry();
 
-    { 先把主程序停掉：它可能正在运行并占用 _internal 里的 DLL，
-      否则 Inno 删不掉文件，用户会看到「卸载没搞干净」。
-      顺序：握手让主程序自己退出 → 还在就 taskkill（同权限下有效）→ 兜底提示。 }
+    { Stop the main app first: it may be running and holding DLLs in _internal,
+      otherwise Inno cannot delete the files and the user sees "uninstall was
+      incomplete". Order: handshake so the app exits by itself -> taskkill if it
+      is still there (works at the same integrity level) -> fallback message. }
     if IsAppRunning() then
     begin
       if not AskAppToExit(12000) then
@@ -242,8 +251,8 @@ begin
       end;
     end;
 
-    { /PURGEDATA 强制连用户数据一起删；否则询问，默认保留。
-      卸载器里没有 CmdLineParamExists，用 ParamStr 遍历。 }
+    { /PURGEDATA forces deleting user data too; otherwise ask, default is keep.
+      The uninstaller has no CmdLineParamExists, so iterate over ParamStr. }
     Purge := False;
     for I := 1 to ParamCount do
       if CompareText(ParamStr(I), '/PURGEDATA') = 0 then
@@ -264,15 +273,15 @@ begin
     end
     else
     begin
-      { 保留用户数据时要清掉握手文件，否则重装后主程序一启动就自己退出 }
+      { Clear the handshake file when keeping user data, otherwise the main app exits as soon as it starts after a reinstall }
       DeleteFile(ExpandConstant('{app}\config\.upgrading'));
     end;
 
     DeleteFile(ExpandConstant('{app}\.maaauto.json'));
-    { 升级残留的 .old exe 与临时目录 }
+    { .old exe and temp dirs left behind by upgrades }
     DeleteFile(ExpandConstant('{app}\upgrade.exe.old'));
 
-    { 进程真的没退掉时明确告诉用户，而不是留下半截目录 }
+    { Tell the user explicitly when the process really would not exit, instead of leaving a half-removed directory }
     if IsAppRunning() then
       MsgBox('MaaAuto 仍在运行，可能无法结束它（权限不足）。' + #13#10 +
              '请手动退出程序后重新卸载，否则部分文件会残留。',

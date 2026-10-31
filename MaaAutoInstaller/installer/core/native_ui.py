@@ -1,17 +1,20 @@
-"""纯 ctypes/Win32 的升级进度窗 —— 不依赖 PySide6 / PyQt / tkinter。
+"""Upgrade progress window in pure ctypes/Win32 -- no PySide6 / PyQt / tkinter.
 
-为什么要自己写：
+Why hand-rolled:
 
-* ``upgrade.exe`` 只是安装包里顺带的一个小工具，PySide6 会把单文件 exe
-  从 ~10 MB 撑到 40+ MB，用户下载 payload 时纯属浪费；
-* 升级流程跑在工作线程，Win32 控件不是线程安全的。历史上在工作线程里
-  直接 ``SetWindowTextW`` 更新进度，偶发 0xC0000005（访问冲突）崩溃。
-  所以这里沿用了 Qt 信号那套思路：工作线程只往窗口线程 ``PostMessageW``
-  投递通知，真正的控件操作全部在窗口过程（主线程的 ``GetMessageW``
-  循环）里串行执行 —— 跨线程直接改 UI 是绝对不能碰的。
+* ``upgrade.exe`` is just a small helper shipped alongside the installer;
+  PySide6 would grow the onefile exe from ~10 MB to 40+ MB, pure waste for
+  someone downloading the payload;
+* the upgrade flow runs on a worker thread and Win32 controls are not thread
+  safe. Historically the worker called ``SetWindowTextW`` directly to update
+  progress and occasionally crashed with 0xC0000005 (access violation). So this
+  follows the Qt signal idea: the worker only ``PostMessageW``s notifications to
+  the window thread, and all real control work runs serially inside the window
+  procedure (the main thread's ``GetMessageW`` loop) -- touching the UI from
+  another thread is absolutely off limits.
 
-对外只暴露一个类 :class:`NativeProgressWindow`，它是纯 Win32 的，可以
-脱离升级流程单独测试。
+Only one class is exposed, :class:`NativeProgressWindow`; it is pure Win32 and
+can be tested independently of the upgrade flow.
 """
 
 import ctypes
@@ -20,7 +23,7 @@ from collections import deque
 from ctypes import wintypes
 
 # --------------------------------------------------------------------------- #
-# Win32 常量 / 类型
+# Win32 constants / types
 # --------------------------------------------------------------------------- #
 WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
@@ -30,12 +33,14 @@ WM_TIMER = 0x0113
 WM_USER = 0x0400
 WM_APP = 0x8000
 
-# 自定义消息统一取 WM_APP+n（应用私有区间，不会和系统消息/控件通知冲突；
-# 即任务里说的「WM_USER+n」私有消息，WM_APP 是官方推荐给应用自己的那一档）。
-WM_APP_STAGE = WM_APP + 1       # 切换阶段文案
-WM_APP_PROGRESS = WM_APP + 2    # 更新进度条
-WM_APP_MESSAGE = WM_APP + 3     # 追加一行日志
-WM_APP_DONE = WM_APP + 4        # 工作线程结束，携带返回码
+# Custom messages use WM_APP+n (an app-private range that cannot collide with
+# system messages or control notifications; this is the "WM_USER+n" private
+# message the task refers to, WM_APP being the officially recommended tier for
+# applications).
+WM_APP_STAGE = WM_APP + 1       # switch the stage text
+WM_APP_PROGRESS = WM_APP + 2    # update the progress bar
+WM_APP_MESSAGE = WM_APP + 3     # append one log line
+WM_APP_DONE = WM_APP + 4        # worker finished, carries the return code
 
 WS_CHILD = 0x40000000
 WS_VISIBLE = 0x10000000
@@ -76,7 +81,7 @@ ICC_PROGRESS_CLASS = 0x0020
 ID_CANCEL = 1001
 ID_TIMER_CLOSE = 1
 
-LPARAM = ctypes.c_size_t      # 按无符号透传，避免指针最高位为 1 时溢出
+LPARAM = ctypes.c_size_t      # passed through unsigned so a pointer with the top bit set cannot overflow
 WPARAM = ctypes.c_size_t
 LRESULT = ctypes.c_ssize_t
 HANDLE = ctypes.c_void_p
@@ -85,7 +90,7 @@ HANDLE = ctypes.c_void_p
 class WNDCLASSW(ctypes.Structure):
     _fields_ = [
         ("style", wintypes.UINT),
-        ("lpfnWndProc", HANDLE),          # 真实类型是 WNDPROC，调用时另行转换
+        ("lpfnWndProc", HANDLE),          # real type is WNDPROC, cast separately at call time
         ("cbClsExtra", ctypes.c_int),
         ("cbWndExtra", ctypes.c_int),
         ("hInstance", HANDLE),
@@ -127,7 +132,7 @@ class INITCOMMONCONTROLSEX(ctypes.Structure):
 
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HANDLE, wintypes.UINT, WPARAM, LPARAM)
 
-# 句柄 → 实例。窗口过程是模块级的，靠 hwnd 找回实例。
+# hwnd -> instance. The window procedure is module level, so the instance is looked up by hwnd.
 _WINDOWS = {}
 _WINDOWS_LOCK = threading.Lock()
 _HINSTANCE = None
@@ -143,9 +148,9 @@ _COMCTL32 = None
 
 
 def _user32():
-    # 注意：WinDLL 每次调用都会返回新的对象，argtypes 不会跨对象保留，
-    # 所以这里必须缓存单例 —— 否则后面拿到的函数又退回默认的 c_int 原型，
-    # 64 位下 lParam 直接 OverflowError。
+    # Note: WinDLL returns a fresh object on every call and argtypes do not
+    # survive across objects, so the singleton must be cached here -- otherwise
+    # later calls get the default c_int prototype and lParam overflows on 64-bit.
     global _USER32
     if _USER32 is None:
         _USER32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -174,7 +179,7 @@ def _comctl32():
 
 
 # --------------------------------------------------------------------------- #
-# 原型声明（64 位下句柄/尺寸必须显式声明，否则默认 int 会截断指针）
+# Prototype declarations (handles/sizes must be declared explicitly on 64-bit, otherwise the default int truncates pointers)
 # --------------------------------------------------------------------------- #
 def _setup_prototypes():
     u = _user32()
@@ -208,7 +213,7 @@ def _setup_prototypes():
     u.PostMessageW.argtypes = [HANDLE, wintypes.UINT, WPARAM, LPARAM]
     u.PostMessageW.restype = wintypes.BOOL
     u.GetMessageW.argtypes = [ctypes.POINTER(MSG), HANDLE, wintypes.UINT, wintypes.UINT]
-    u.GetMessageW.restype = wintypes.BOOL       # 可能是 -1，故用 BOOL
+    u.GetMessageW.restype = wintypes.BOOL       # may return -1, hence BOOL
     u.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
     u.TranslateMessage.restype = wintypes.BOOL
     u.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
@@ -263,10 +268,11 @@ _setup_prototypes()
 
 
 def _init_dpi_awareness() -> None:
-    """开 DPI 感知，否则 125%/150% 缩放下字体被系统位图拉伸发虚。
+    """Enable DPI awareness, otherwise fonts get bitmap-stretched and blurry at
+    125%/150% scaling.
 
-    优先 Per-Monitor V2（Win10 1703+），失败退到系统级 shcore，再退到
-    最老的 ``SetProcessDPIAware``。
+    Prefer Per-Monitor V2 (Win10 1703+), fall back to system-level shcore, then
+    to the oldest ``SetProcessDPIAware``.
     """
     global _DPI_DONE
     if _DPI_DONE:
@@ -314,10 +320,10 @@ def _system_dpi() -> int:
 
 
 def _wnd_proc(hwnd, msg, wparam, lparam):
-    """模块级窗口过程：找回实例后交给它的处理函数。
+    """Module-level window procedure: find the instance, delegate to its handler.
 
-    这里运行在窗口线程（主线程）上，所有控件操作都在这个上下文里做，
-    不会出现跨线程改 UI 导致的崩溃。
+    This runs on the window thread (main thread) and every control operation
+    happens in this context, so cross-thread UI changes cannot crash.
     """
     with _WINDOWS_LOCK:
         inst = _WINDOWS.get(int(hwnd or 0))
@@ -329,7 +335,7 @@ def _wnd_proc(hwnd, msg, wparam, lparam):
     return _user32().DefWindowProcW(hwnd, msg, wparam, lparam)
 
 
-# 关键：WNDPROC 对象必须一直持有，否则被 GC 掉后窗口过程变成野指针 → 崩。
+# Critical: the WNDPROC object must stay referenced; if it is garbage collected the window procedure becomes a dangling pointer -> crash.
 _WNDPROC_REF = WNDPROC(_wnd_proc)
 
 
@@ -353,16 +359,16 @@ def _register_class() -> None:
     wc.lpszClassName = _CLASS_NAME
     if not u.RegisterClassW(ctypes.byref(wc)):
         err = ctypes.get_last_error()
-        # 1410 = ERROR_CLASS_ALREADY_EXISTS（同一进程重复注册），可忽略
+        # 1410 = ERROR_CLASS_ALREADY_EXISTS (class registered twice in this process), ignorable
         if err not in (0, 1410):
             raise ctypes.WinError(err)
     _CLASS_REGISTERED = True
 
 
 class NativeProgressWindow:
-    """Win32 原生进度窗。
+    """Native Win32 progress window.
 
-    用法::
+    Usage::
 
         win = NativeProgressWindow(title="…", silent=False)
         flow = UpgradeFlow(..., on_stage=win.post_stage,
@@ -371,8 +377,9 @@ class NativeProgressWindow:
                            cancel_check=win.is_cancelled)
         code = win.run(lambda: flow.run_full())
 
-    ``run`` 会创建窗口、起工作线程、跑消息循环，返回流程的退出码
-    （线程异常时由调用方转成 2）。
+    ``run`` creates the window, starts the worker thread and runs the message
+    loop, returning the exit code of the flow (a thread exception is turned
+    into 2).
     """
 
     def __init__(self, title: str, silent: bool = False,
@@ -399,8 +406,9 @@ class NativeProgressWindow:
         self._cancel_evt = threading.Event()
         self._lock = threading.Lock()
 
-        # 工作线程只负责把「最新值」塞进这些槽位，然后 PostMessage 通知。
-        # 阶段/日志用队列，保证每个阶段都显示；进度只留最新值（刷得太快）。
+        # The worker thread only drops the "latest value" into these slots and
+        # then PostMessageW's; stage/log use queues so every stage shows up,
+        # progress keeps just the latest value (it updates too fast).
         self._pending_stages = deque()
         self._pending_progress = None
         self._pending_msgs = deque()
@@ -410,7 +418,7 @@ class NativeProgressWindow:
         self._log_text = ""
 
     # ------------------------------------------------------------------ #
-    # 给工作线程用的投递接口（只投递，不碰控件）
+    # Posting interface for the worker thread (post only, never touch controls)
     # ------------------------------------------------------------------ #
     def post_stage(self, key):
         text = self.stage_text.get(key, key)
@@ -444,11 +452,11 @@ class NativeProgressWindow:
         hwnd = self.hwnd
         if not hwnd or self._closed:
             return
-        # 只投递消息；控件操作留到窗口线程，绝不在工作线程直接改 UI。
+        # Post the message only; control work stays on the window thread -- never change the UI from the worker.
         _user32().PostMessageW(HANDLE(hwnd), msg, WPARAM(wparam), LPARAM(lparam))
 
     # ------------------------------------------------------------------ #
-    # 窗口创建 / 布局
+    # Window creation / layout
     # ------------------------------------------------------------------ #
     def _create(self):
         _init_dpi_awareness()
@@ -494,8 +502,9 @@ class NativeProgressWindow:
             "EDIT", "",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY
             | ES_AUTOVSCROLL, ex_style=WS_EX_CLIENTEDGE)
-        # 控件的 hMenu 参数就是控件 ID，必须显式传，否则都是 0，
-        # WM_COMMAND 里就分不清是哪个按钮（取消会失效）。
+        # The control hMenu parameter is the control ID and must be passed
+        # explicitly; otherwise all of them are 0 and WM_COMMAND cannot tell
+        # which button was hit (cancel would stop working).
         self._hwnd_btn = self._make_control(
             "BUTTON", "后台升级中…" if self.silent else "取消",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, ctrl_id=ID_CANCEL)
@@ -510,7 +519,7 @@ class NativeProgressWindow:
         u.SendMessageW(HANDLE(self._hwnd_bar), PBM_SETPOS, WPARAM(0), LPARAM(0))
         u.SetWindowTextW(HANDLE(self._hwnd_stage), "准备中…")
         if self.silent:
-            # silent 语义：不可交互，按钮只作为状态提示
+            # silent semantics: not interactive, the button is a status hint only
             u.EnableWindow(HANDLE(self._hwnd_btn), False)
 
         self._layout()
@@ -598,7 +607,7 @@ class NativeProgressWindow:
             _user32().MoveWindow(HANDLE(hwnd), x, y, w, h, True)
 
     # ------------------------------------------------------------------ #
-    # 窗口线程的消息处理
+    # Window-thread message handling
     # ------------------------------------------------------------------ #
     def _handle_message(self, hwnd, msg, wparam, lparam):
         u = _user32()
@@ -648,10 +657,10 @@ class NativeProgressWindow:
             return 0
         if msg == WM_CLOSE:
             if self.silent:
-                # silent 模式不允许用户关窗打断升级（与 2.x 语义一致）
+                # silent mode must not let the user close the window and interrupt the upgrade (same semantics as 2.x)
                 return 0
             if self._code is None:
-                # 用户提前关窗：置取消标志并退出，返回码沿用「未完成 → 2」
+                # user closed the window early: set the cancel flag and exit, keeping the "not finished -> 2" return code
                 self._cancel_evt.set()
             self._destroy()
             return 0
@@ -681,8 +690,8 @@ class NativeProgressWindow:
             u.SetWindowTextW(HANDLE(self._hwnd_stage), "升级失败，详见日志")
         if self._hwnd_btn and not self.silent:
             u.EnableWindow(HANDLE(self._hwnd_btn), False)
-        # 延迟关闭用 SetTimer，绝不在窗口线程 sleep —— sleep 会阻塞消息循环，
-        # 窗口会假死（“未响应”）。
+        # Delayed close uses SetTimer; never sleep on the window thread -- a
+        # sleep blocks the message loop and the window appears hung ("not responding").
         if self.close_delay_ms > 0:
             u.SetTimer(HANDLE(self.hwnd), ID_TIMER_CLOSE,
                        self.close_delay_ms, None)
@@ -692,13 +701,14 @@ class NativeProgressWindow:
     def _append_log_line(self, text):
         if not self._hwnd_log:
             return
-        # 这里用「累积文本 + SetWindowTextW」，而不是 EM_REPLACESEL：
-        # 后者需要把字符串指针塞进 LPARAM，ctypes 签名得来回切换，容易出错。
-        # 升级日志量很小（几十行），整块重设完全够用。
+        # This uses "accumulated text + SetWindowTextW" instead of EM_REPLACESEL:
+        # the latter needs a string pointer stuffed into LPARAM, which means
+        # flipping ctypes signatures back and forth and is easy to get wrong.
+        # Upgrade logs are tiny (a few dozen lines), a full reset is plenty.
         self._log_text += ("\r\n" if self._log_text else "") + str(text)
         u = _user32()
         u.SetWindowTextW(HANDLE(self._hwnd_log), self._log_text)
-        # 光标移到末尾并滚动，读到最新一行
+        # Move the caret to the end and scroll so the newest line is visible
         end = WPARAM(0xFFFFFFFFFFFFFFFF)
         u.SendMessageW(HANDLE(self._hwnd_log), EM_SETSEL, end,
                        LPARAM(0xFFFFFFFFFFFFFFFF))
@@ -727,7 +737,7 @@ class NativeProgressWindow:
         self._font = self._font_title = None
 
     # ------------------------------------------------------------------ #
-    # 主入口
+    # Main entry point
     # ------------------------------------------------------------------ #
     def _worker_main(self, task):
         try:
@@ -735,10 +745,10 @@ class NativeProgressWindow:
         except Exception:
             code = 2
         self._post(WM_APP_DONE, wparam=code)
-        # 若窗口已被用户提前关掉，_post 会静默失败，流程线程自行结束即可。
+        # If the user already closed the window, _post fails silently; the flow thread just ends.
 
     def run(self, task) -> int:
-        """创建窗口、起工作线程、跑消息循环，返回流程退出码。"""
+        """Create the window, start the worker thread, run the message loop; return the flow exit code."""
         self._create()
         self._thread = threading.Thread(target=self._worker_main, args=(task,),
                                         name="upgrade-flow", daemon=True)
@@ -755,7 +765,7 @@ class NativeProgressWindow:
             u.TranslateMessage(ctypes.byref(msg))
             u.DispatchMessageW(ctypes.byref(msg))
 
-        # 和原 Qt 实现一致：窗口先关了也等工作线程最多 3 秒
+        # Same as the original Qt implementation: wait up to 3 seconds for the worker even after the window closed
         try:
             if self._thread.is_alive():
                 self._thread.join(3.0)

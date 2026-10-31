@@ -1,13 +1,14 @@
-"""MaaAuto 3.0.0 一键构建（CI 与本机共用）。
+"""One-shot build for MaaAuto 3.0.0 (shared by CI and local runs).
 
-产出（默认在 ``dist/``）::
+Outputs (in ``dist/`` by default)::
 
-    MaaAuto_payload_v{ver}.zip          ← 升级器下载
-    MaaAuto_Setup_v{ver}-Windows-x64.exe ← 新用户下载（内嵌 payload）
-    MaaAuto_Online_v{ver}-Windows-x64.exe← 在线引导包（约 2 MB）
+    MaaAuto_payload_v{ver}.zip          <- downloaded by the updater
+    MaaAuto_Setup_v{ver}-Windows-x64.exe <- full installer for new users (payload embedded)
+    MaaAuto_Online_v{ver}-Windows-x64.exe<- online bootstrap stub (about 2 MB)
 
-流程：契约校验 → 主程序 build.py → 裁剪 payload → 打 upgrade.exe → 压 payload
-→ Inno 编译完整包 → 计算 sha256 → Inno 编译在线包。
+Pipeline: contract check -> main app build.py -> trim payload -> pack upgrade.exe
+-> zip payload -> compile the full installer with Inno -> compute sha256 ->
+compile the online stub with Inno.
 """
 
 import argparse
@@ -22,8 +23,9 @@ import traceback
 import zipfile
 from pathlib import Path
 
-# CI 的 runner 默认 stdout 编码是 cp1252，打印中文日志会直接 UnicodeEncodeError。
-# 在 import 之后立刻切成 UTF-8，本地与 CI 行为一致。
+# The CI runner default stdout encoding is cp1252, so printing non-ASCII log
+# text raises UnicodeEncodeError outright. Switch to UTF-8 right after import
+# so local and CI runs behave the same.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -74,7 +76,7 @@ def find_iscc(explicit: str = "") -> Path:
             return p
         raise FileNotFoundError(f"ISCC 不存在: {p}")
 
-    # 候选路径（choco / winget / 手动安装的位置不一样）
+    # Candidate locations (choco / winget / manual installs differ)
     candidates = list(ISCC_CANDIDATES)
     for env_name in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
         base = os.environ.get(env_name)
@@ -97,7 +99,7 @@ def find_iscc(explicit: str = "") -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 契约
+# Contract
 # --------------------------------------------------------------------------- #
 def read_app_info(source_dir: Path) -> dict:
     text = (source_dir / "app_info.py").read_text(encoding="utf-8")
@@ -140,12 +142,13 @@ def check_contract(source_dir: Path) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 执行
+# Execution
 # --------------------------------------------------------------------------- #
 def run(cmd, cwd: Path, timeout: int = 3600, tag: str = "") -> None:
     log(f"执行{(' ' + tag) if tag else ''}: {' '.join(str(c) for c in cmd)}")
-    # 子进程也要 UTF-8：CI runner 的默认 stdout 是 cp1252，
-    # build.py / PyInstaller 打印中文会直接 UnicodeEncodeError。
+    # The child process needs UTF-8 too: the CI runner default stdout is
+    # cp1252, so Chinese output from build.py / PyInstaller raises
+    # UnicodeEncodeError.
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["PYTHONUTF8"] = "1"
@@ -165,7 +168,7 @@ def run(cmd, cwd: Path, timeout: int = 3600, tag: str = "") -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 步骤
+# Steps
 # --------------------------------------------------------------------------- #
 def build_main(source_dir: Path) -> Path:
     log("打包主程序（build.py）...")
@@ -188,7 +191,7 @@ def make_payload(main_dist: Path, trim: bool) -> Path:
         run([sys.executable, str(PACKAGING / "trim_payload.py"), str(payload), "--apply"],
             cwd=HERE, tag="裁剪")
 
-    # payload 不应包含用户数据
+    # payload must not carry user data
     for name in ("config", "logs", ".maaauto.json"):
         p = payload / name
         if p.exists():
@@ -216,8 +219,9 @@ def build_upgrade_exe(debug: bool) -> Path:
         "--paths", str(HERE),
         "--hidden-import", "psutil",
         "--hidden-import", "installer.core.payload",
-        # bsdiff4 只在构建机生成补丁时用；应用端是纯标准库 bspatch。
-        # 不排除的话 PyInstaller 会顺着 delta.py 里的惰性 import 把它打进去。
+        # bsdiff4 is only used on the build machine to generate patches; the
+        # apply side is stdlib-only bspatch. Without this exclusion PyInstaller
+        # follows the lazy import in delta.py and bundles it.
         "--exclude-module", "bsdiff4",
         str(TOOLS / "upgrade_stub.py"),
     ]
@@ -249,10 +253,11 @@ def make_payload_zip(payload: Path, upgrade_exe: Path, version: str,
 
 
 def fetch_prev_payload(info: dict, dest: Path) -> tuple:
-    """从 GitHub 取「最新正式版」的 payload 作为差分基准。
+    """Fetch the payload of the latest stable release from GitHub as the delta base.
 
-     CI 每次发版都在干净环境里构建，没有上一版产物，所以按 ``APP_UPDATE_API``
-    查 latest，下载 ``payload_v{tag}.zip``（约 68 MB，runner 上很快）。
+     CI builds every release in a clean environment with no previous artifacts,
+     so it queries ``APP_UPDATE_API`` for latest and downloads
+     ``payload_v{tag}.zip`` (about 68 MB, fast on a runner).
     """
     import json as _json
     import urllib.request as _req
@@ -287,7 +292,7 @@ def fetch_prev_payload(info: dict, dest: Path) -> tuple:
 
 def build_delta_zip(payload: Path, base: Path, base_version: str,
                     version: str, info: dict) -> Path:
-    """生成 ``{delta_prefix}{base}_to_{version}.zip``。"""
+    """Build ``{delta_prefix}{base}_to_{version}.zip``."""
     from installer.core import delta as delta_mod
     out = DIST / f"{info['APP_DELTA_ASSET_PREFIX']}{base_version}_to_{version}.zip"
     log(f"生成差分包: {base_version} -> {version}")
@@ -298,7 +303,7 @@ def build_delta_zip(payload: Path, base: Path, base_version: str,
 def compile_installer(version: str, info: dict, payload_dir: Path,
                       iscc: Path) -> Path:
     exe_name = f"MaaAuto_Setup_v{version}-Windows-x64.exe"
-    # Inno 的 VersionInfoVersion 只接受纯数字：1.0.1b1 → 1.0.1.0
+    # Inno VersionInfoVersion accepts digits only: 1.0.1b1 -> 1.0.1.0
     m = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
     quad = f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0" if m else "0.0.0.0"
     log("编译完整安装包（Inno Setup）...")
@@ -352,7 +357,7 @@ def read_installer_version() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 主流程
+# Main flow
 # --------------------------------------------------------------------------- #
 def main() -> int:
     ap = argparse.ArgumentParser(description="构建 MaaAuto 3.0.0 发布产物")
@@ -424,7 +429,7 @@ def main() -> int:
         setup_sha = sha256_of(setup)
         online = compile_online(version, setup.name, setup_sha, iscc)
 
-        # 差分包（可选）：只包含变化的文件，实测 61 MB → 0.6 MB
+        # Delta package (optional): changed files only, measured 61 MB -> 0.6 MB
         delta_zip = None
         base_path = args.delta_from
         base_version = args.delta_base_version

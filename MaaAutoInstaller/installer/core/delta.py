@@ -1,20 +1,24 @@
-"""差分更新：构建端生成补丁包，运行端（``upgrade.exe``）按补丁还原新文件。
+"""Delta updates: the build side generates a patch package, the run side
+(``upgrade.exe``) restores the new files from it.
 
-设计取舍
---------
-* **文件级 + bsdiff 混合**：内容没变的文件不进包；变了的文件如果能压成很小的
-  bsdiff 补丁就只带补丁，否则直接带整文件。实测 1.1.0 → 1.1.1：
-  整包 61.2 MB，纯文件级 13.1 MB，混合后约 0.55 MB。
-* **构建端**用 ``bsdiff4``（只装在构建机/CI）；**运行端**用 ``bspatch``（纯标准库），
-  升级器体积不变。
-* **安全**：应用补丁前先校验本地旧文件的 sha256 是否等于包内记录的 ``base_sha256``
-  （用户装过魔改/别的构建时必须拒绝，回退整包）；还原后再校验新文件的 sha256。
+Design trade-offs
+-----------------
+* **File level + bsdiff hybrid**: unchanged files never enter the package; a
+  changed file ships as a small bsdiff patch when that is cheap enough,
+  otherwise as the whole file. Measured 1.1.0 -> 1.1.1: full package 61.2 MB,
+  pure file-level 13.1 MB, hybrid about 0.55 MB.
+* **Build side** uses ``bsdiff4`` (installed on build machines/CI only); the
+  **run side** uses ``bspatch`` (stdlib only), so the updater size stays the same.
+* **Safety**: before applying a patch the local old file sha256 is checked
+  against the ``base_sha256`` recorded in the package (a locally modified or
+  differently built install must be rejected and fall back to the full package);
+  after restoring, the new file sha256 is verified too.
 
-包内结构::
+Package layout::
 
-    delta.json                       # 清单：format/base/target/files/delete
-    patches/<相对路径>.bsdiff         # mode=patch 的文件
-    <相对路径>                       # mode=full 的文件
+    delta.json                       # manifest: format/base/target/files/delete
+    patches/<relative path>.bsdiff   # files with mode=patch
+    <relative path>                  # files with mode=full
 """
 
 import hashlib
@@ -29,22 +33,22 @@ DELTA_FORMAT = 1
 DELTA_MANIFEST = "delta.json"
 PATCH_DIR = "patches"
 
-# 补丁体积超过目标文件的这个比例时不划算，直接带整文件
+# Above this fraction of the target file a patch is not worth it; ship the whole file
 PATCH_THRESHOLD = 0.5
-# 补丁再小也不值得（zip 头 + 读写开销）
+# Even a tiny patch is not worth it (zip header + read/write overhead)
 PATCH_MIN_SAVING = 4096
 
 
 class DeltaError(RuntimeError):
-    """补丁包损坏、格式不符、还原结果校验失败。"""
+    """Corrupt package, unsupported format, or failed restore verification."""
 
 
 class BaseMismatch(DeltaError):
-    """本地文件与补丁包记录的基准版本不一致（不是同一份安装）。"""
+    """Local files do not match the base version recorded in the package (a different install)."""
 
 
 # --------------------------------------------------------------------------- #
-# 基础工具
+# Basic helpers
 # --------------------------------------------------------------------------- #
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -59,7 +63,7 @@ def sha256_file(path: Path) -> str:
 
 
 def _safe_rel(name: str) -> str:
-    """拒绝绝对路径与 ``..``（防 zip-slip）。"""
+    """Reject absolute paths and ``..`` (zip-slip guard)."""
     rel = name.replace("\\", "/").lstrip("/")
     parts = [p for p in rel.split("/") if p not in ("", ".")]
     if not parts or any(p == ".." for p in parts):
@@ -68,7 +72,7 @@ def _safe_rel(name: str) -> str:
 
 
 def index_dir(root: Union[str, Path]) -> Dict[str, Tuple[int, str]]:
-    """``相对路径 -> (字节数, sha256)``。"""
+    """``relative path -> (byte count, sha256)``."""
     root = Path(root)
     out: Dict[str, Tuple[int, str]] = {}
     for p in sorted(root.rglob("*")):
@@ -78,7 +82,7 @@ def index_dir(root: Union[str, Path]) -> Dict[str, Tuple[int, str]]:
 
 
 def index_zip(zip_path: Union[str, Path]) -> Dict[str, Tuple[int, str]]:
-    """直接对 payload zip 建索引，不必解压到磁盘。"""
+    """Index a payload zip directly, without extracting to disk."""
     out: Dict[str, Tuple[int, str]] = {}
     with zipfile.ZipFile(zip_path) as zf:
         for info in zf.infolist():
@@ -110,7 +114,7 @@ def _read_base_file(base: Path, rel: str) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
-# 构建端
+# Build side
 # --------------------------------------------------------------------------- #
 def build_delta(new_payload_dir: Union[str, Path],
                 base: Union[str, Path],
@@ -119,9 +123,9 @@ def build_delta(new_payload_dir: Union[str, Path],
                 base_version: str,
                 log: Optional[Callable[[str], None]] = None,
                 threshold: float = PATCH_THRESHOLD) -> dict:
-    """生成 ``base`` → ``new_payload_dir`` 的差分包，返回统计信息。
+    """Build the delta package for ``base`` -> ``new_payload_dir``; return stats.
 
-    :param base: 上一版 payload（``.zip`` 或已解压目录）
+    :param base: previous payload (``.zip`` or an extracted directory)
     """
     new_dir = Path(new_payload_dir)
     out_zip = Path(out_zip)
@@ -135,7 +139,7 @@ def build_delta(new_payload_dir: Union[str, Path],
                 pass
 
     try:
-        import bsdiff4  # 仅构建端需要
+        import bsdiff4  # build side only
     except Exception:
         bsdiff4 = None
         _log("未安装 bsdiff4：本次只做文件级差分（不带二进制补丁）")
@@ -157,7 +161,7 @@ def build_delta(new_payload_dir: Union[str, Path],
             size, digest = new_idx[rel]
             old = base_idx.get(rel)
             if old and old[1] == digest:
-                continue                      # 内容没变
+                continue                      # content unchanged
             data = (new_dir / rel).read_bytes()
             raw_changed += len(data)
             entry = {"path": rel, "sha256": digest, "size": size}
@@ -165,7 +169,7 @@ def build_delta(new_payload_dir: Union[str, Path],
             if bsdiff4 is not None and old is not None:
                 try:
                     patch = bsdiff4.diff(_read_base_file(base, rel), data)
-                except Exception as e:        # 极小/异常文件，退回整文件
+                except Exception as e:        # tiny/odd file, fall back to the whole file
                     _log(f"  bsdiff 失败，整文件带走 {rel}: {e}")
                     patch = None
                 if patch is not None and len(patch) < min(
@@ -205,7 +209,7 @@ def build_delta(new_payload_dir: Union[str, Path],
 
 
 # --------------------------------------------------------------------------- #
-# 运行端
+# Run side
 # --------------------------------------------------------------------------- #
 def read_manifest_from_zip(delta_zip: Union[str, Path]) -> dict:
     with zipfile.ZipFile(delta_zip) as zf:
@@ -226,11 +230,11 @@ def materialize(delta_zip: Union[str, Path],
                 log: Optional[Callable[[str], None]] = None,
                 progress: Optional[Callable[[int, int], None]] = None,
                 cancel_check: Optional[Callable[[], bool]] = None) -> Tuple[int, List[str]]:
-    """把补丁包还原成一份「只有变更文件」的目录树。
+    """Restore the package into a tree holding only the changed files.
 
-    :return: ``(还原文件数, 需要删除的相对路径列表)``
-    :raises BaseMismatch: 本地文件与基准不符（应回退整包）
-    :raises DeltaError: 补丁损坏或还原结果校验失败
+    :return: ``(restored file count, list of relative paths to delete)``
+    :raises BaseMismatch: local files do not match the base (fall back to the full package)
+    :raises DeltaError: corrupt patch or failed restore verification
     """
     install_dir = Path(install_dir)
     stage_dir = Path(stage_dir)

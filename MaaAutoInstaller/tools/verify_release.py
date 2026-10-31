@@ -1,22 +1,23 @@
-"""安装包完整验证：静默安装 → 内容校验 → 假 Release 升级 → 卸载。
+"""Full installer verification: silent install -> content checks -> fake
+Release upgrade -> uninstall.
 
-用法（在安装器仓库根目录）::
+Usage (from the installer repo root) ::
 
     python MaaAutoInstaller/tools/verify_release.py 1.2.0
 
-前置：
-  * 已用 build_release.py 构建出 dist/ 下的 Setup / Online / payload / SHA256SUMS；
-  * 当前用户能安装 per-user 程序（不需要管理员）。
+Prerequisites:
+  * Setup / Online / payload / SHA256SUMS already built into dist/ by build_release.py;
+  * the current user can install per-user programs (no admin required).
 
-验证内容：
-  1. 产物齐全 + SHA256SUMS 与文件一致；
-  2. 安装（`/MERGETASKS=!startmenuicon`）→ 不创建开始菜单；manifest 版本正确；
-  3. 打包内容：i18n 键一致、教程/公告/模板在包内；
-  4. 卸载干净；
-  5. 默认安装（创建开始菜单）→ 两个快捷方式；
-  6. 用 tools/fake_release_server.py 做离线升级（1.0.0 → 目标版本），
-     校验版本/manifest/用户数据/无残留标志；
-  7. 卸载（`/PURGEDATA`）→ 安装目录、开始菜单、桌面快捷方式全部清掉。
+Checks:
+  1. all artifacts present + SHA256SUMS matching the files;
+  2. install (``/MERGETASKS=!startmenuicon``) -> no Start menu created; manifest version correct;
+  3. packaged content: i18n keys consistent, tutorial/announcements/templates included;
+  4. uninstall leaves nothing behind;
+  5. default install (creates the Start menu) -> both shortcuts;
+  6. offline upgrade via tools/fake_release_server.py (1.0.0 -> target version),
+     verifying version/manifest/user data/no leftover flags;
+  7. uninstall (``/PURGEDATA``) -> install dir, Start menu and desktop shortcut all removed.
 """
 
 import hashlib
@@ -32,20 +33,23 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent          # MaaAutoInstaller/tools
 INSTALLER_ROOT = HERE.parent.parent             # MaaAuto-Installer/
 DIST = INSTALLER_ROOT / "dist"
-sys.path.insert(0, str(HERE.parent))   # MaaAutoInstaller/，包名叫 installer
+sys.path.insert(0, str(HERE.parent))   # MaaAutoInstaller/, package name is installer
 
 from installer.core import shell_integration as shell  # noqa: E402
 
-# 校验必须装在**独立目录**：Inno 的卸载注册表项 / 开始菜单组 / 桌面快捷方式
-# 是按 AppId 全局共享的，装在用户的正式安装目录（默认 %LOCALAPPDATA%\Programs\MaaAuto，
-# 或用户自选的 D:\MaaAuto）上再卸载，会把用户那份的登记信息一起删掉
-# —— 1.4.1 就是被这个脚本坑过：用户「设置→应用」变成「系统找不到应用」，
-# 开始菜单和桌面图标也一起没了。程序文件没动，坏的只是登记信息。
+# Verification must install into a **separate directory**: Inno's uninstall
+# registry key, Start menu group and desktop shortcut are shared globally by
+# AppId, so installing over the user's real install dir (default
+# %LOCALAPPDATA%\Programs\MaaAuto, or a custom D:\MaaAuto) and then uninstalling
+# deletes the user's registration too -- 1.4.1 was bitten by exactly this:
+# "Settings > Apps" showed "the system cannot find the app", and the Start menu
+# and desktop icons disappeared with it. Program files were untouched; only the
+# registration was broken.
 APP_DIR = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "MaaAuto_verify"
 SM = shell.start_menu_group()
 DESKTOP_LNK = shell.desktop_lnk()
 
-# 开跑前备份「外壳集成」，结束时原样还原
+# Back up the shell integration before starting; restore it verbatim at the end
 _foreign = shell.foreign_install(APP_DIR)
 if _foreign is not None:
     print("=" * 72)
@@ -137,7 +141,8 @@ def install(extra=None):
     shell.clear_start_menu_group()
     if DESKTOP_LNK.exists():
         DESKTOP_LNK.unlink()
-    # 必须显式 /DIR：Inno 默认复用上次安装目录（本机曾被 deploy_dev.py 装到 D:\MaaAuto）
+    # /DIR is mandatory: Inno reuses the last install dir by default (this machine
+    # was once installed to D:\MaaAuto by deploy_dev.py)
     args = [local_setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
             f"/DIR={APP_DIR}"]
     if extra:

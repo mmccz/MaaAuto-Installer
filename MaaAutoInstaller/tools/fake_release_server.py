@@ -1,37 +1,39 @@
 #!/usr/bin/env python
-"""本地假 Release 服务器：**不联网**也能把升级链路从头到尾跑一遍。
+"""Local fake Release server: run the whole upgrade path **offline**.
 
-为什么需要它
-------------
-真实升级要等 GitHub 上有 Release 才能测，而升级链路（查版本 → 下载 → sha256
-校验 → 停主程序 → 解压替换 → 回滚 → 更新 manifest → 重启）恰恰是最容易出错的
-一段。这个脚本用 `http.server` 模拟 GitHub Releases API 的形状，把本地构建出来的
-`MaaAuto_payload_v{ver}.zip` 当作「远端资产」提供出去，于是升级器会完全按真实
-流程跑，只是 URL 指向 127.0.0.1。
+Why this exists
+---------------
+A real upgrade needs a published GitHub Release to test against, and the upgrade
+path (check version -> download -> sha256 verify -> stop main app -> unpack and
+replace -> rollback -> update manifest -> restart) is the most failure-prone
+part. This script mimics the GitHub Releases API shape with `http.server` and
+serves a locally built payload as the remote asset, so the updater runs the real
+flow, only with URLs pointing at 127.0.0.1.
 
-用法（两步）
-------------
-1. 起服务（会打印注入命令）：
+Usage (two steps)
+-----------------
+1. Start the server (it prints the command to inject):
 
     python tools/fake_release_server.py --payload ..\\dist\\MaaAuto_payload_v1.0.2.zip
 
-2. 让目标安装目录指向本地服务，然后跑升级器：
+2. Point the target install directory at the local server, then run the updater:
 
-    # 该脚本可以直接帮你改 .maaauto.json（只改 extra.update_api）
+    # this script can patch .maaauto.json for you (only extra.update_api)
     python tools/fake_release_server.py --payload ..\\dist\\MaaAuto_payload_v1.0.2.zip ^
         --patch-manifest C:\\MaaAutoTest\\app
 
     C:\\MaaAutoTest\\app\\upgrade.exe --from-main --check-only --no-ui
     C:\\MaaAutoTest\\app\\upgrade.exe --from-main --no-ui
 
-注意
-----
-* 只用于本地测试。`--patch-manifest` 会把 `extra.update_api` 改成
-  `http://127.0.0.1:<port>/releases/latest`；测试完记得用完整安装包重装，
-  或把该字段改回 GitHub 地址，否则程序会一直查本地地址。
-* 服务按 GitHub 的形状返回 `digest: "sha256:..."`，所以升级器的**校验分支**
-  同样会被真实执行（校验失败 → 回滚 + 写 upgrade_failed.flag）。
-* 想让校验失败（测试回滚），加 `--corrupt-digest`。
+Notes
+-----
+* Local testing only. `--patch-manifest` rewrites `extra.update_api` to
+  `http://127.0.0.1:<port>/releases/latest`; reinstall from the full package or
+  change the field back to the GitHub URL afterwards, otherwise the app keeps
+  querying the local address.
+* The server returns `digest: "sha256:..."` in GitHub shape, so the updater's
+  **verification branch** really runs (mismatch -> rollback + upgrade_failed.flag).
+* Add `--corrupt-digest` to make verification fail on purpose (rollback test).
 """
 
 import argparse
@@ -97,12 +99,12 @@ def build_release(base_url: str, version: str, tag: str, payload: Path,
 class Handler(BaseHTTPRequestHandler):
     server_version = "MaaAutoFakeRelease/1.0"
 
-    # ---- 由 main() 注入 ----
+    # ---- injected by main() ----
     release: dict = None
     payload_path: Path = None
-    asset_paths: dict = {}          # 资产名 -> 本地文件（含差分包）
+    asset_paths: dict = {}          # asset name -> local file (delta included)
 
-    def log_message(self, fmt, *args):        # 默认会刷屏，简化
+    def log_message(self, fmt, *args):        # default is noisy; keep it short
         print(f"  [http] {self.address_string()} {fmt % args}")
 
     def _send_json(self, obj, status=200):
@@ -113,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):                          # noqa: N802 (http.server 约定)
+    def do_GET(self):                          # noqa: N802 (http.server convention)
         path = self.path.split("?")[0]
 
         if path in ("/releases/latest", "/releases/latest/"):
@@ -147,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def patch_manifest(install_dir: Path, api: str) -> bool:
-    """把测试安装目录的 extra.update_api 指向本地假服务。"""
+    """Point the test install directory's extra.update_api at the local fake server."""
     path = install_dir / ".maaauto.json"
     if not path.exists():
         print(f"[!] 找不到 {path}，先跑一次完整安装包")
@@ -156,7 +158,7 @@ def patch_manifest(install_dir: Path, api: str) -> bool:
     extra = data.setdefault("extra", {})
     old = extra.get("update_api")
     extra["update_api"] = api
-    # 让升级器认为「当前版本更旧」，否则同一版本不会触发升级
+    # Make the updater see an older version; otherwise the same version never upgrades
     data["version"] = "1.0.0"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[ok] 已把 {path} 的 version 改成 1.0.0，update_api 改为本地：")

@@ -1,12 +1,13 @@
-"""payload 升级核心。
+"""payload update core.
 
-3.0.0 起，升级不再在用户机上编译：CI 产出 ``MaaAuto_payload_v{ver}.zip``
-（主程序 onedir 产物 + 新版 upgrade.exe），升级器只负责
+Since 3.0.0 upgrades are no longer compiled on the user machine: CI produces
+``MaaAuto_payload_v{ver}.zip`` (main app onedir output + new upgrade.exe) and
+the updater only has to
 
-    查版本 → 下载 → 校验 sha256 → 解压到临时目录 → 备份并替换 → 更新 manifest
+    check version -> download -> verify sha256 -> extract to temp dir -> back up and replace -> update manifest
 
-任何一步失败都回滚到升级前的文件集合。用户数据（``config/``、``logs/``、
-``.maaauto.json``）永远不参与替换。
+Any failing step rolls back to the pre-upgrade file set. User data (``config/``,
+``logs/``, ``.maaauto.json``) never takes part in the replacement.
 """
 
 import hashlib
@@ -28,7 +29,7 @@ from installer.core.manifest import (Manifest, read_manifest, write_manifest,
                                      MANIFEST_NAME)
 
 # --------------------------------------------------------------------------- #
-# 常量
+# Constants
 # --------------------------------------------------------------------------- #
 MAIN_EXE_NAME = "MaaAuto.exe"
 UPGRADE_EXE_NAME = "upgrade.exe"
@@ -37,30 +38,31 @@ UNINSTALL_EXE_NAME = "uninstall.exe"
 UPGRADE_FLAG_NAME = ".upgrading"
 FAILURE_FLAG_NAME = "upgrade_failed.flag"
 
-# 顶层的这些名字不参与升级替换
+# These top-level names never take part in the upgrade replacement
 PROTECTED_TOP = {"config", "logs", MANIFEST_NAME}
 
-# 主程序收到 .upgrading 后要保存配置、等任务线程、杀子进程、退出 Qt
+# On .upgrading the main app saves config, waits for task threads, kills child processes and quits Qt
 DEFAULT_EXIT_TIMEOUT = 15.0
 
-# 清单里没有 extra.min_installer_version 时（1.0.0 之前装的旧版本）的兜底下限。
-# 必须与 installer/contract.py 的 min_installer_version 基线一致：
-# 之前写的是 3.0.0 —— 版本号重置后 1.x 的升级器永远「过旧」，老用户会被卡住。
+# Fallback lower bound when the manifest has no extra.min_installer_version
+# (installs from before 1.0.0). Must match the min_installer_version baseline in
+# installer/contract.py: this used to say 3.0.0 -- after the version reset, 1.x
+# updaters were always "too old" and old users got stuck.
 DEFAULT_MIN_INSTALLER_VERSION = "1.0.0"
 USER_AGENT = "MaaAutoUpgradeStub/3.0"
 
-# 差分资产命名：``MaaAuto_delta_v{from}_to_{to}.zip``
-# 与主程序 app_info.APP_DELTA_ASSET_PREFIX 保持一致（跨仓库契约，改了两边一起发版）。
+# Delta asset naming: ``MaaAuto_delta_v{from}_to_{to}.zip``
+# Must match app_info.APP_DELTA_ASSET_PREFIX in the main app (cross-repo contract: change both and release together).
 DELTA_ASSET_PREFIX = "MaaAuto_delta_v"
 
 _OLD_SUFFIX = ".old"
 
 
 # --------------------------------------------------------------------------- #
-# 版本
+# Versions
 # --------------------------------------------------------------------------- #
 def parse_version(text: str) -> Optional[Tuple[int, ...]]:
-    """解析 ``X.Y.Z[(a|b|rc)N][.postN]``；失败返回 None。"""
+    """Parse ``X.Y.Z[(a|b|rc)N][.postN]``; return None on failure."""
     import re
     if not text:
         return None
@@ -76,7 +78,7 @@ def parse_version(text: str) -> Optional[Tuple[int, ...]]:
 
 
 def compare_versions(a: str, b: str) -> Optional[int]:
-    """>0 表示 a 比 b 新；解析失败返回 None。"""
+    """Return >0 when a is newer than b; None when parsing fails."""
     va, vb = parse_version(a), parse_version(b)
     if va is None or vb is None:
         return None
@@ -84,7 +86,7 @@ def compare_versions(a: str, b: str) -> Optional[int]:
 
 
 # --------------------------------------------------------------------------- #
-# 查询
+# Queries
 # --------------------------------------------------------------------------- #
 @dataclass
 class UpdateInfo:
@@ -97,12 +99,12 @@ class UpdateInfo:
     payload_name: str = ""
     payload_size: int = 0
     payload_sha: str = ""
-    # 差分更新（Release 里有对应资产才用；失败自动回退整包）
+    # Delta update (used only when the release carries the matching asset; falls back to the full package on failure)
     delta_url: str = ""
     delta_name: str = ""
     delta_size: int = 0
     delta_sha: str = ""
-    # 跳版本时的串行差分：按顺序依次应用（每项是 GitHub 资产 dict）
+    # Serial delta across skipped versions: applied in order (each item is a GitHub asset dict)
     delta_chain: list = field(default_factory=list)
     notes: str = ""
     html_url: str = ""
@@ -124,7 +126,7 @@ def fetch_latest_release(api: str, timeout: int = 20) -> dict:
 
 
 def _list_api(update_api: str) -> str:
-    """``.../releases/latest`` → ``.../releases``（beta 频道用）。"""
+    """``.../releases/latest`` -> ``.../releases`` (used by the beta channel)."""
     base = (update_api or "").rstrip("/")
     if base.endswith("/latest"):
         base = base[: -len("/latest")]
@@ -132,10 +134,10 @@ def _list_api(update_api: str) -> str:
 
 
 def fetch_release(api: str, channel: str = "stable", timeout: int = 20) -> dict:
-    """按频道取 Release。
+    """Fetch a release for the given channel.
 
-    stable：只取 ``releases/latest``（GitHub 不返回 prerelease）；
-    beta  ：取 ``releases`` 列表，忽略 draft，按版本号取最高（含 prerelease）。
+    stable: only ``releases/latest`` (GitHub does not return prereleases);
+    beta  : the ``releases`` list, drafts ignored, highest version wins (prereleases included).
     """
     if channel != "beta":
         return fetch_latest_release(api, timeout)
@@ -164,7 +166,7 @@ def _sha_from_asset(asset: dict) -> str:
 
 def pick_payload_asset(release: dict, version: str,
                        payload_prefix: str) -> Optional[dict]:
-    """按固定命名规则找 payload：``{prefix}{version}.zip``。"""
+    """Find the payload by its fixed naming rule: ``{prefix}{version}.zip``."""
     want = f"{payload_prefix}{version}.zip".lower()
     for asset in release.get("assets") or []:
         if (asset.get("name") or "").lower() == want:
@@ -173,7 +175,7 @@ def pick_payload_asset(release: dict, version: str,
 
 
 def pick_delta_asset(release: dict, current: str, latest: str) -> Optional[dict]:
-    """找 ``MaaAuto_delta_v{current}_to_{latest}.zip``；没有就返回 None。"""
+    """Find ``MaaAuto_delta_v{current}_to_{latest}.zip``; None when absent."""
     if not current or parse_version(current) is None:
         return None
     want = f"{DELTA_ASSET_PREFIX}{current}_to_{latest}.zip".lower()
@@ -184,7 +186,7 @@ def pick_delta_asset(release: dict, current: str, latest: str) -> Optional[dict]
 
 
 def fetch_releases(api: str, timeout: int = 20, per_page: int = 60) -> list:
-    """取 Release 列表（含旧版本），用于找「跳版本」的串行差分链。"""
+    """Fetch the release list (old versions included) to find the serial delta chain for skipped versions."""
     url = f"{_list_api(api)}?per_page={int(per_page)}"
     try:
         data = _request_json(url, timeout)
@@ -194,9 +196,9 @@ def fetch_releases(api: str, timeout: int = 20, per_page: int = 60) -> list:
 
 
 def collect_delta_edges(releases) -> Dict[str, Dict[str, dict]]:
-    """从所有 Release 的资产里收集 ``{from_version: {to_version: asset}}``。
+    """Collect ``{from_version: {to_version: asset}}`` from the assets of all releases.
 
-    资产名规则：``{DELTA_ASSET_PREFIX}{from}_to_{to}.zip``。
+    Asset naming rule: ``{DELTA_ASSET_PREFIX}{from}_to_{to}.zip``.
     """
     edges: Dict[str, Dict[str, dict]] = {}
     prefix = DELTA_ASSET_PREFIX.lower()
@@ -220,7 +222,7 @@ def collect_delta_edges(releases) -> Dict[str, Dict[str, dict]]:
 def find_delta_chain(edges: Dict[str, Dict[str, dict]],
                      current: str, target: str,
                      max_hops: int = 4) -> list:
-    """在差分图里找 ``current → target`` 的最短链（BFS）。找不到返回 ``[]``。"""
+    """Find the shortest ``current -> target`` chain in the delta graph (BFS). Return ``[]`` when absent."""
     if not current or current == target:
         return []
     queue = [(current, [])]
@@ -293,7 +295,7 @@ def check_update(manifest: Optional[Manifest],
     info.payload_size = int(asset.get("size") or 0)
     info.payload_sha = _sha_from_asset(asset)
 
-    # 差分资产可选：只有「当前版本正好是某个 base」时才有，没有就整包
+    # Delta assets are optional: present only when the current version is exactly some base; otherwise the full package
     delta_asset = pick_delta_asset(release, info.current, latest)
     if delta_asset:
         info.delta_name = delta_asset.get("name", "")
@@ -302,7 +304,7 @@ def check_update(manifest: Optional[Manifest],
         info.delta_sha = _sha_from_asset(delta_asset)
         info.delta_chain = [delta_asset]
     else:
-        # 没有「上一版→本版」的直接差分：找串行链（1.2.0 → 1.3.0 → 1.4.0）
+        # No direct previous-version -> this-version delta: look for a serial chain (1.2.0 -> 1.3.0 -> 1.4.0)
         chain = find_delta_chain(
             collect_delta_edges(fetch_releases(update_api)),
             info.current, latest)
@@ -325,7 +327,7 @@ def check_update(manifest: Optional[Manifest],
 
 
 # --------------------------------------------------------------------------- #
-# 校验
+# Verification
 # --------------------------------------------------------------------------- #
 def sha256_of_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -336,7 +338,7 @@ def sha256_of_file(path: Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 主程序进程
+# Main app process
 # --------------------------------------------------------------------------- #
 def is_main_running(exe_name: str = MAIN_EXE_NAME) -> bool:
     try:
@@ -358,10 +360,11 @@ def is_main_running(exe_name: str = MAIN_EXE_NAME) -> bool:
 def request_main_exit(install_dir: Path,
                       timeout: float = DEFAULT_EXIT_TIMEOUT,
                       log: Optional[Callable[[str], None]] = None) -> bool:
-    """写 ``.upgrading`` 并等待主程序退出；超时 taskkill。
+    """Write ``.upgrading`` and wait for the main app to exit; taskkill on timeout.
 
-    无论成功失败，只要走到 taskkill 分支就清理标志——标志的归属权在
-    调用方（终态处理会再清一次）。
+    Whether it succeeds or not, the flag is cleared once the taskkill branch is
+    reached -- the flag belongs to the caller (final state handling clears it
+    once more).
     """
     install_dir = Path(install_dir)
 
@@ -409,7 +412,7 @@ def request_main_exit(install_dir: Path,
 
 
 # --------------------------------------------------------------------------- #
-# 握手文件
+# Handshake files
 # --------------------------------------------------------------------------- #
 def clear_upgrading_flag(install_dir: Path) -> bool:
     flag = Path(install_dir) / "config" / UPGRADE_FLAG_NAME
@@ -447,7 +450,7 @@ def clear_failure_flag(install_dir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 备份 / 替换
+# Backup / replace
 # --------------------------------------------------------------------------- #
 @dataclass
 class ApplyResult:
@@ -455,9 +458,9 @@ class ApplyResult:
     rolled_back: bool = False
     replaced: int = 0
     error: str = ""
-    # 差分专用：本地文件与补丁基准不符（不是同一份安装）→ 调用方应回退整包
+    # Delta only: local files do not match the patch base (a different install) -> the caller should fall back to the full package
     base_mismatch: bool = False
-    # 这次是走差分还是整包
+    # whether this run used a delta or the full package
     via_delta: bool = False
 
 
@@ -466,7 +469,7 @@ def _is_protected(rel: Path) -> bool:
 
 
 def _safe_extract(zip_path: Path, dest: Path) -> int:
-    """解压并拒绝路径穿越；返回文件数。"""
+    """Extract, rejecting path traversal; return the file count."""
     count = 0
     dest_resolved = dest.resolve()
     with zipfile.ZipFile(zip_path) as zf:
@@ -491,7 +494,7 @@ def _walk_files(root: Path) -> List[Path]:
 
 
 def _remove_running_exe_conflict(target: Path) -> Optional[Path]:
-    """若目标正是当前运行的 upgrade.exe，先把它改名让位（Windows 允许改名运行中的 exe）。"""
+    """If the target is the currently running upgrade.exe, rename it out of the way first (Windows allows renaming a running exe)."""
     try:
         running = Path(sys.executable).resolve()
     except Exception:
@@ -509,7 +512,7 @@ def _remove_running_exe_conflict(target: Path) -> Optional[Path]:
 
 
 def cleanup_old_exe(install_dir: Path) -> None:
-    """删除上一次升级留下的 ``upgrade.exe.old``（本次运行已可删除）。"""
+    """Delete the ``upgrade.exe.old`` left by the previous upgrade (safe to delete now)."""
     old = Path(install_dir) / (UPGRADE_EXE_NAME + _OLD_SUFFIX)
     try:
         if old.exists():
@@ -519,7 +522,7 @@ def cleanup_old_exe(install_dir: Path) -> None:
 
 
 def cleanup_backups(install_dir: Path) -> None:
-    """删除升级遗留的临时目录（成功路径），失败路径由回滚负责。"""
+    """Delete temp dirs left by the upgrade (success path); the failure path is handled by rollback."""
     parent = Path(install_dir).parent
     for pattern in (".MaaAuto_new_*", ".MaaAuto_bak_*"):
         for p in parent.glob(pattern):
@@ -531,10 +534,11 @@ def _commit_tree(new_dir: Path, bak_dir: Path, install_dir: Path,
                  progress: Optional[Callable[[int, int], None]] = None,
                  cancel_check: Optional[Callable[[], bool]] = None,
                  via_delta: bool = False) -> ApplyResult:
-    """把准备好的 ``new_dir`` 覆盖到安装目录；失败按相反顺序回滚。
+    """Overlay the prepared ``new_dir`` onto the install dir; roll back in reverse order on failure.
 
-    整包与差分共用这一层：差分只是「new_dir 里只有变更文件，外加一个删除清单」。
-    每个被替换/删除的文件都会先备份到 ``bak_dir``，所以回滚能把两边都还原。
+    Full package and delta share this layer: a delta is just "new_dir holds only
+    the changed files, plus a delete list". Every replaced or deleted file is
+    backed up into ``bak_dir`` first, so rollback restores both sides.
     """
     moved_in: List[Path] = []
     backed_up: List[Tuple[Path, Path]] = []
@@ -555,7 +559,7 @@ def _commit_tree(new_dir: Path, bak_dir: Path, install_dir: Path,
             if dst.exists():
                 bak = bak_dir / rel
                 bak.parent.mkdir(parents=True, exist_ok=True)
-                # 运行中的 upgrade.exe 不能直接覆盖，先改名
+                # a running upgrade.exe cannot be overwritten directly, rename it first
                 renamed = _remove_running_exe_conflict(dst)
                 if renamed is not None:
                     old_exe = renamed
@@ -569,7 +573,7 @@ def _commit_tree(new_dir: Path, bak_dir: Path, install_dir: Path,
             if progress and idx % 200 == 0:
                 progress(1 + idx / max(1, len(files)), 3)
 
-        # 差分包可能带「上一版有、这一版删掉」的文件（如改名的 DLL）
+        # A delta may carry files the previous version had and this one dropped (e.g. renamed DLLs)
         for rel_name in delete_rels or []:
             rel = Path(rel_name)
             if _is_protected(rel):
@@ -592,14 +596,14 @@ def _commit_tree(new_dir: Path, bak_dir: Path, install_dir: Path,
 
     except Exception as e:
         _log(f"替换失败，开始回滚: {e}")
-        # 先删掉已经放进去的新文件
+        # First delete the new files already put in place
         for dst in reversed(moved_in):
             try:
                 if dst.exists():
                     dst.unlink()
             except Exception:
                 pass
-        # 再把备份放回去（含被删除的旧文件）
+        # Then put the backups back (including the deleted old files)
         for dst, bak in reversed(backed_up):
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -625,7 +629,7 @@ def apply_payload(install_dir: Path,
                   log: Optional[Callable[[str], None]] = None,
                   progress: Optional[Callable[[int, int], None]] = None,
                   cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
-    """解压整包 payload 并替换安装目录内的文件；失败自动回滚。"""
+    """Extract the full payload and replace files in the install dir; roll back automatically on failure."""
     install_dir = Path(install_dir).resolve()
     parent = install_dir.parent
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -642,7 +646,7 @@ def apply_payload(install_dir: Path,
     if cancel_check and cancel_check():
         return ApplyResult(success=False, error="用户取消")
 
-    # 1) 解压
+    # 1) extract
     try:
         shutil.rmtree(new_dir, ignore_errors=True)
         new_dir.mkdir(parents=True, exist_ok=True)
@@ -657,7 +661,7 @@ def apply_payload(install_dir: Path,
         shutil.rmtree(new_dir, ignore_errors=True)
         return ApplyResult(success=False, error=f"解压失败: {e}")
 
-    # 2) 备份 + 替换
+    # 2) back up + replace
     return _commit_tree(new_dir, bak_dir, install_dir, [], _log,
                         progress=progress, cancel_check=cancel_check)
 
@@ -667,10 +671,11 @@ def apply_delta(install_dir: Path,
                 log: Optional[Callable[[str], None]] = None,
                 progress: Optional[Callable[[int, int], None]] = None,
                 cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
-    """用差分包更新安装目录。
+    """Update the install dir from a delta package.
 
-    ``result.base_mismatch=True`` 表示本地文件与补丁基准不符（不是同一份安装），
-    调用方应改下整包，而不是报错给用户。
+    ``result.base_mismatch=True`` means local files do not match the patch base
+    (a different install); the caller should switch to the full package instead
+    of reporting an error to the user.
     """
     install_dir = Path(install_dir).resolve()
     parent = install_dir.parent
@@ -713,18 +718,20 @@ def apply_delta(install_dir: Path,
 
 
 # --------------------------------------------------------------------------- #
-# 重启
+# Restart
 # --------------------------------------------------------------------------- #
 def apply_delta_chain(install_dir: Path,
                       delta_zips: list,
                       log: Optional[Callable[[str], None]] = None,
                       progress: Optional[Callable[[int, int], None]] = None,
                       cancel_check: Optional[Callable[[], bool]] = None) -> ApplyResult:
-    """依次应用多个差分包（跳版本升级，如 1.2.0 → 1.3.0 → 1.4.0）。
+    """Apply several delta packages in order (multi-hop upgrade, e.g. 1.2.0 -> 1.3.0 -> 1.4.0).
 
-    做法：先把安装目录复制成一份「工作副本」，在副本上逐级打补丁
-    （每级都以副本当前内容为基准），全部成功后再一次性覆盖安装目录。
-    好处是**整个链只有一次提交/回滚**：中间任何一步失败，安装目录都没被动过。
+    Approach: copy the install dir into a working copy and patch that
+    incrementally (each hop bases on the copy's current content), then overlay
+    the install dir in one shot once every hop succeeded. The upside is **one
+    commit/rollback for the whole chain**: if any hop fails, the install dir was
+    never touched.
     """
     install_dir = Path(install_dir).resolve()
     parent = install_dir.parent

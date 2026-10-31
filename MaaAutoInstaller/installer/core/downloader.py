@@ -1,4 +1,4 @@
-"""统一下载工具（urllib 实现，支持进度回调 + 镜像回退）。"""
+"""Unified download helper (urllib based, progress callback + mirror fallback)."""
 
 import os
 import urllib.request
@@ -13,7 +13,7 @@ class DownloadError(Exception):
 
 USER_AGENT = "MaaAutoInstaller/1.0 (+https://github.com/mmccz/MaaAuto-Tool-works)"
 
-# 分块大小：256 KB
+# Chunk size: 256 KB
 CHUNK = 256 * 1024
 
 
@@ -23,10 +23,10 @@ def download_file(url: str,
                   progress: Optional[Callable[[int, int], None]] = None,
                   timeout: int = 60) -> Path:
     """
-    下载 url 到 dest。若 dest 已存在会被覆盖。
+    Download ``url`` to ``dest``. An existing ``dest`` is overwritten.
 
-    :param log:      回调 (msg)
-    :param progress: 回调 (current_bytes, total_bytes)；total=0 表示未知
+    :param log:      callback (msg)
+    :param progress: callback (current_bytes, total_bytes); total=0 means unknown
     :return: dest
     """
     dest = Path(dest)
@@ -60,7 +60,7 @@ def download_file(url: str,
                             progress(received, total)
                         except Exception:
                             pass
-        # 下载完成，原子替换
+        # Download complete, atomic replace
         if dest.exists():
             dest.unlink()
         os.replace(tmp, dest)
@@ -90,7 +90,7 @@ def copy_with_progress(src: Path, dst: Path,
                        log: Optional[Callable[[str], None]] = None,
                        progress: Optional[Callable[[int, int], None]] = None,
                        chunk: int = 1024 * 1024) -> Path:
-    """本地大文件复制（用于释放内嵌的 launcher.exe 等）。"""
+    """Copy a large local file (used to unpack an embedded launcher.exe etc.)."""
     src = Path(src)
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)

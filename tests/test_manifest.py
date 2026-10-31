@@ -1,7 +1,8 @@
-"""manifest（.maaauto.json）读写的测试。
+"""Tests for reading and writing the manifest (.maaauto.json).
 
-这是安装器与升级器之间的契约文件：字段名写错、未知字段被丢弃、
-时间戳不刷新，都会让升级逻辑读到错的版本号。
+This is the contract file between installer and updater: a wrong field name, a
+dropped unknown field, or a stale timestamp makes the upgrade logic read the
+wrong version.
 """
 
 import json

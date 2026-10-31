@@ -1,12 +1,12 @@
-"""core：安装器/升级器的全部业务逻辑，不依赖 GUI。
+"""core: all installer/updater business logic, no GUI dependency.
 
-3.0.0 起只剩三类能力：
+Since 3.0.0 only these pieces remain:
 
-* ``manifest``    —— ``.maaauto.json`` 读写
-* ``payload``     —— 升级核心（查版本 / 下载 / 校验 / 替换 / 回滚）
-* ``downloader``  —— 带进度的 HTTP 下载
-* ``delta``       —— 差分包生成（构建端）与还原（运行端）
-* ``bspatch``     —— BSDIFF40 补丁应用（纯标准库）
+* ``manifest``    -- read/write ``.maaauto.json``
+* ``payload``     -- update core (check version / download / verify / replace / roll back)
+* ``downloader``  -- HTTP download with progress
+* ``delta``       -- delta package generation (build side) and restore (run side)
+* ``bspatch``     -- apply BSDIFF40 patches (stdlib only)
 """
 
 from installer.core.manifest import (Manifest, read_manifest, write_manifest,

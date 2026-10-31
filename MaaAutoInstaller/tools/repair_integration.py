@@ -1,18 +1,20 @@
-"""修复「升级后桌面图标 / 开始菜单 / 『设置→应用』条目消失」。
+"""Repair a desktop icon / Start menu / "Settings > Apps" entry lost after an upgrade.
 
-现象
-----
-* 「设置 → 应用」里的 MaaAuto 显示「系统找不到应用」（或整条没了）；
-* 开始菜单里没有 MaaAuto 文件夹；
-* 桌面图标不见了。
+Symptoms
+--------
+* "Settings > Apps" shows "the system cannot find the app" for MaaAuto (or the entry is gone);
+* no MaaAuto folder in the Start menu;
+* the desktop shortcut is missing.
 
-但安装目录（如 ``D:\\MaaAuto``）里的 ``MaaAuto.exe`` 还在、还能直接运行。
+But ``MaaAuto.exe`` is still in the install directory (e.g. ``D:\\MaaAuto``) and runs fine.
 
-原因：Inno 的卸载注册表项、开始菜单组、桌面快捷方式都是**按 AppId 全局共享**的。
-本地发布校验脚本用同一个 AppId 装到 ``%LOCALAPPDATA%\\Programs\\MaaAuto`` 再卸载，
-就把用户那份（哪怕装在别的目录）的登记信息一起删了。程序文件不受影响。
+Cause: Inno's uninstall registry key, Start menu group and desktop shortcut are
+**shared globally by AppId**. The local release check script installs to
+``%LOCALAPPDATA%\\Programs\\MaaAuto`` with the same AppId and then uninstalls,
+which deletes the user's registration as well (even if installed elsewhere).
+Program files are unaffected.
 
-本工具只重建登记信息，不动任何程序文件 / 用户配置：
+This tool only rebuilds the registration; it never touches program files or user config:
 
     python MaaAutoInstaller/tools/repair_integration.py
     python MaaAutoInstaller/tools/repair_integration.py --dir D:\\MaaAuto
@@ -26,7 +28,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # MaaAutoInstaller/tools
 INSTALLER_ROOT = HERE.parent.parent             # MaaAuto-Installer/
-sys.path.insert(0, str(HERE.parent))   # MaaAutoInstaller/，包名叫 installer
+sys.path.insert(0, str(HERE.parent))   # MaaAutoInstaller/, package name is installer
 
 from installer.core import shell_integration as shell  # noqa: E402
 
@@ -38,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 def guess_candidates() -> list:
-    """注册表里登记的目录 + 几个常见安装位置。"""
+    """Directories registered in the registry plus a few common install locations."""
     out = []
     loc = shell.installed_location()
     if loc:

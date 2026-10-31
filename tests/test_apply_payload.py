@@ -1,7 +1,8 @@
-"""apply_payload 的替换 / 保护 / 回滚 / 路径穿越测试。
+"""Replacement / protection / rollback / path traversal tests for apply_payload.
 
-这是升级最危险的一段代码：它直接往安装目录里覆盖文件。
-测试用临时目录 + 手工构造的 zip，不联网、不碰真实安装。
+This is the most dangerous part of an upgrade: it overwrites files directly in the
+install directory. Tests use temp dirs plus hand-built zips, with no network and
+no real install.
 """
 
 import zipfile
@@ -36,7 +37,7 @@ def test_apply_replaces_files_and_keeps_user_data(tmp_path):
     zpath = make_zip(tmp_path / "p.zip", {
         payload.MAIN_EXE_NAME: "NEW-EXE",
         "new_lib.dll": "NEW-LIB",
-        # payload 里混进用户数据也不能覆盖用户的
+        # user data smuggled into the payload must not overwrite the user's
         "config/config.json": '{"keep": false}',
         "logs/task.log": "payload log",
     })
@@ -53,7 +54,7 @@ def test_apply_replaces_files_and_keeps_user_data(tmp_path):
 
 
 def test_old_files_are_not_deleted(tmp_path):
-    """payload 里没有的文件（比如用户自己放的）不该被动。"""
+    """Files absent from the payload (e.g. added by the user) must be left alone."""
     install = make_install(tmp_path)
     zpath = make_zip(tmp_path / "p.zip", {payload.MAIN_EXE_NAME: "NEW"})
 
@@ -84,7 +85,7 @@ def test_path_traversal_is_rejected(tmp_path):
 
 
 def test_failure_midway_rolls_back(tmp_path, monkeypatch):
-    """替换到一半失败时，已替换的文件必须恢复原内容。"""
+    """If replacement fails midway, already replaced files must be restored."""
     install = make_install(tmp_path)
     zpath = make_zip(tmp_path / "p.zip", {
         payload.MAIN_EXE_NAME: "NEW-EXE",

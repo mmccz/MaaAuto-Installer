@@ -6,8 +6,8 @@
 
 **MaaAuto 的打包与升级仓库** —— Inno Setup 安装包 + payload 升级器
 
-[![Version](https://img.shields.io/badge/version-1.4.1-2f81f7.svg)](CHANGELOG.md)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/version-1.4.5-2f81f7.svg)](CHANGELOG.md)
+[![Python](https://img.shields.io/badge/Python-3.15%2B-3776AB.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://github.com/mmccz/MaaAuto-Installer/releases)
 [![Main App](https://img.shields.io/badge/main%20app-MaaAuto--Tool--works-6f42c1.svg)](https://github.com/mmccz/MaaAuto-Tool-works)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
@@ -18,7 +18,7 @@
 
 ## 这是什么
 
-**3.0.0 起，程序在 CI 预构建，用户机器上不再有 Python / pip / PyInstaller。**
+**1.0.0 起，程序在 CI 预构建，用户机器上不再有 Python / pip / PyInstaller。**
 
 本仓库负责两件事：
 
@@ -31,10 +31,11 @@
 
 | 文件 | 大小 | 用途 |
 | --- | --- | --- |
-| `MaaAuto_Setup_v{ver}-Windows-x64.exe` | ~94 MB | 完整安装包，内嵌 payload，断网可装 |
+| `MaaAuto_Setup_v{ver}-Windows-x64.exe` | ~59 MB | 完整安装包，内嵌 payload，断网可装 |
 | `MaaAuto_Online_v{ver}-Windows-x64.exe` | ~2 MB | 在线引导包，安装时才下载完整包 |
-| `MaaAuto_payload_v{ver}.zip` | ~100 MB | 升级器下载的预构建程序包 |
-| `SHA256SUMS.txt` | — | 上述三个文件的校验和 |
+| `MaaAuto_payload_v{ver}.zip` | ~66 MB | 升级器下载的预构建程序包 |
+| `MaaAuto_delta_v{old}_to_{new}.zip` | ~0.5 MB | 差分包（相邻版本才有，没有就回退整包） |
+| `SHA256SUMS.txt` | — | 上述文件的校验和（发版时生成） |
 
 ---
 
@@ -121,9 +122,9 @@ upgrade.exe --from-main [--restart] [--silent] [--check-only] [--no-ui] [--chann
 
 ```powershell
 cd MaaAutoInstaller
-pip install -r requirements.txt      # psutil（upgrade.exe 已不再需要 PySide6）
-pip install pyinstaller
-winget install JRSoftware.InnoSetup  # 提供 ISCC.exe
+py -m pip install -r requirements.txt   # psutil（upgrade.exe 已不再需要 PySide6）
+py -m pip install pyinstaller
+winget install JRSoftware.InnoSetup     # 提供 ISCC.exe
 ```
 
 > `upgrade.exe` 的进度窗是纯 ctypes/Win32（`installer/core/native_ui.py`），
@@ -131,18 +132,20 @@ winget install JRSoftware.InnoSetup  # 提供 ISCC.exe
 > 那是主程序自己的依赖，与本仓库无关。
 
 还需要主程序源码目录（默认自动探测同级仓库，或 `--source-dir` 指定）。
+本机开发用 Python 3.15（`py` 启动器），CI 也用 3.15；`upgrade.exe` 与安装包本身不依赖 Python。
 
 ### 一条命令
 
 ```powershell
 cd MaaAutoInstaller
-python build_release.py                    # 完整构建
-python build_release.py --keep-build       # 保留中间产物
-python build_release.py --skip-main-build  # 复用主程序 dist/
-python build_release.py --skip-stub        # 复用 _build/stub/upgrade.exe
-python build_release.py --no-trim          # 不裁剪
-python build_release.py --debug            # upgrade.exe 保留控制台
-python build_release.py --source-dir ..\..\MaaAuto-Tool-works\MaaAutoProject
+py build_release.py                    # 完整构建
+py build_release.py --keep-build       # 保留中间产物
+py build_release.py --skip-main-build  # 复用主程序 dist/
+py build_release.py --skip-stub        # 复用 _build/stub/upgrade.exe
+py build_release.py --no-trim          # 不裁剪
+py build_release.py --debug            # upgrade.exe 保留控制台
+py build_release.py --source-dir ..\..\MaaAuto-Tool-works\MaaAutoProject
+py build_release.py --skip-main-build --delta-from ../dist/MaaAuto_payload_v1.4.4.zip  # 本机补 delta
 ```
 
 流程：**契约校验** → 主程序 `build.py` → 复制并裁剪 payload（约 −67 MB）→ PyInstaller 打包 `upgrade.exe` → 压缩 payload（LZMA）→ Inno 编译完整包 → 计算 sha256 → Inno 编译在线包 → 写 `dist/SHA256SUMS.txt`。
@@ -153,8 +156,8 @@ python build_release.py --source-dir ..\..\MaaAuto-Tool-works\MaaAutoProject
 
 ```powershell
 cd ..                 # 仓库根
-pip install pytest
-python -m pytest tests -q
+py -m pip install pytest
+py -m pytest tests -q        # 98 passed
 ```
 
 覆盖：版本解析/比较、payload 资产匹配与 stable/beta 频道选择、
@@ -171,7 +174,7 @@ python -m pytest tests -q
 
 ```powershell
 # ① 起假服务器（顺手把测试安装的 update_api 指向本机、版本改成 1.0.0）
-python tools\fake_release_server.py --payload ..\dist\MaaAuto_payload_v1.0.x.zip `
+py tools\fake_release_server.py --payload ..\dist\MaaAuto_payload_v1.0.x.zip `
     --port 8765 --patch-manifest "$env:LOCALAPPDATA\Programs\MaaAuto"
 
 # ② 另开窗口：只检查 / 真正升级
@@ -191,17 +194,17 @@ $app = "$env:LOCALAPPDATA\Programs\MaaAuto"
 
 ```powershell
 # 安装包 E2E：静默安装 → 内容校验 → 假 Release 升级 → 卸载（发版前本机跑）
-python tools\verify_release.py 1.1.1
+py tools\verify_release.py 1.4.5
 
 # 发布前 smoke：静默安装 → 查产物/manifest → 卸干净（CI 每版必跑，也可本机跑）
-python tools\smoke_install.py 1.1.1
+py tools\smoke_install.py 1.4.5
 
 # 发布后元数据：Release/digest/公告源（不下载大文件，发版后跑）
-python tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.1.1
+py tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.4.5
 
 # 被误删了图标 / 「设置→应用」条目：重建登记（不动程序文件与配置）
-python tools\repair_integration.py
-python tools\repair_integration.py --dir D:\MaaAuto
+py tools\repair_integration.py
+py tools\repair_integration.py --dir D:\MaaAuto
 ```
 
 > ⚠️ **千万别把校验脚本指向正式安装目录**。Inno 的卸载注册表项、开始菜单组、桌面快捷方式
@@ -217,7 +220,7 @@ python tools\repair_integration.py --dir D:\MaaAuto
 
 ### CI
 
-`.github/workflows/release.yml` **位于主程序仓库**（Release 与 tag 都在那边）：推 `v*` tag 后检出本仓库、装依赖与 Inno、跑 `build_release.py`，把 4 个资产（Setup / Online / payload / SHA256SUMS）挂到 Release；正文取主程序仓库的 `RELEASE_NOTES.md`，构建成功**直接发布**（`draft: false`），tag 含 `b` / `rc` 时自动标记为 prerelease。发布后建议跑一遍 `tools\verify_release_meta.py` 复核。
+`.github/workflows/release.yml` **位于主程序仓库**（Release 与 tag 都在那边）：推 `v*` tag 后检出本仓库、装依赖与 Inno（Python 3.15），跑 `build_release.py`，把资产（Setup / Online / payload / delta / SHA256SUMS）挂到 Release；正文取主程序仓库的 `RELEASE_NOTES.md`，构建成功**直接发布**（`draft: false`），tag 含 `b` / `rc` 时自动标记为 prerelease。发布会自己找上一版产物生成差分包（`--delta-auto`）。发布后建议跑一遍 `tools\verify_release_meta.py` 复核。
 
 发布前还有一道 **安装/卸载 smoke**（`tools\smoke_install.py`）：在干净 runner 上真的静默安装 → 校验
 `MaaAuto.exe` / `upgrade.exe` / `.maaauto.json`（版本与 `contract.py` 契约）→ 静默卸载并确认目录清空。
@@ -281,9 +284,10 @@ MaaAuto-Installer/
 | 限制 | 说明 |
 | --- | --- |
 | 未签名 | SmartScreen 会提示「未知发布者」；构建脚本预留了签名步骤，拿到证书后接入即可 |
-| 不做差分升级 | 每次升级下载全量 payload（约 100 MB）；文件级差分留待后续 |
-| 安装包变大 | 从 ~50 MB 变成 ~94 MB，换来免编译与可复现 |
+| 差分包只覆盖相邻版本 | `MaaAuto_delta_v{old}_to_{new}.zip` 只对上一版有效；跨多版会静默回退整包（约 66 MB） |
+| 安装包体积 | Setup ~59 MB、payload ~66 MB；用体积换「免编译 + 可复现」 |
 | 升级器版本门槛 | `min_installer_version = 1.0.0`；低于它的旧安装包需要重装一次 |
+| 登录自启 | 打包版带 `requireAdministrator` 清单，1.4.5 起改用「登录时运行 + 最高权限」计划任务；旧的 HKCU Run 项会在启动时自动迁移 |
 
 ---
 
