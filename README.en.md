@@ -77,9 +77,9 @@ py tools\fake_release_server.py --payload ..\dist\MaaAuto_payload_v1.0.x.zip
 ### Release checks
 
 ```powershell
-py tools\verify_release.py 1.4.5         # E2E: silent install -> content check -> fake upgrade -> uninstall
-py tools\smoke_install.py 1.4.5          # smoke: install -> manifest check -> clean uninstall (CI runs this every release)
-py tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.4.5   # Release/digest/announcement metadata
+py tools\verify_release.py 1.4.6         # E2E: silent install -> content check -> fake upgrade -> uninstall
+py tools\smoke_install.py 1.4.6          # smoke: install -> manifest check -> clean uninstall (CI runs this every release)
+py tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.4.6   # Release/digest/announcement metadata
 py tools\repair_integration.py --dir D:\MaaAuto                  # rebuild shortcuts / "Settings → Apps" entry
 ```
 

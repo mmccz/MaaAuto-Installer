@@ -6,7 +6,7 @@
 
 **MaaAuto 的打包与升级仓库** —— Inno Setup 安装包 + payload 升级器
 
-[![Version](https://img.shields.io/badge/version-1.4.5-2f81f7.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.4.6-2f81f7.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.15%2B-3776AB.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://github.com/mmccz/MaaAuto-Installer/releases)
 [![Main App](https://img.shields.io/badge/main%20app-MaaAuto--Tool--works-6f42c1.svg)](https://github.com/mmccz/MaaAuto-Tool-works)
@@ -196,13 +196,13 @@ $app = "$env:LOCALAPPDATA\Programs\MaaAuto"
 
 ```powershell
 # 安装包 E2E：静默安装 → 内容校验 → 假 Release 升级 → 卸载（发版前本机跑）
-py tools\verify_release.py 1.4.5
+py tools\verify_release.py 1.4.6
 
 # 发布前 smoke：静默安装 → 查产物/manifest → 卸干净（CI 每版必跑，也可本机跑）
-py tools\smoke_install.py 1.4.5
+py tools\smoke_install.py 1.4.6
 
 # 发布后元数据：Release/digest/公告源（不下载大文件，发版后跑）
-py tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.4.5
+py tools\verify_release_meta.py mmccz/MaaAuto-Tool-works 1.4.6
 
 # 被误删了图标 / 「设置→应用」条目：重建登记（不动程序文件与配置）
 py tools\repair_integration.py
