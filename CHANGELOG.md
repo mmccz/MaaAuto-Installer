@@ -7,6 +7,28 @@
 
 ---
 
+## [1.4.3] - 2026-10-31
+
+**开发工具修复：Store 版 Python（MSIX）下外壳集成读写落到重定向目录。**
+
+### 问题
+
+Microsoft Store 版 Python 是 MSIX 打包应用，写 `%APPDATA%` 会被静默重定向到
+`%LOCALAPPDATA%\Packages\...\LocalCache\Roaming`。于是：
+
+- `repair_integration.py` 报「开始菜单 OK」，Explorer 里却什么也没有；
+- `verify_release.py` 的 `restore()` 也写进重定向目录，用户开始菜单实际没被还原。
+
+### 修复
+
+- `shell_integration.packaged_python()` 检测 MSIX；命中时开始菜单的读、写、
+  建快捷方式全部交给子进程 `powershell.exe`（子进程不继承包身份，写真实路径）；
+- 新增 `start_menu_files()` / `clear_start_menu_group()`，校验工具改用真实视图；
+- `restore()` 增加保护：快照无登记但现有登记指向仍在的正式安装时保留，不误删；
+- `verify_release` 第 [7] 步断言开始菜单与桌面按快照还原。
+
+测试：安装器 92 → 98。安装器/升级器运行时代码无行为变化。
+
 ## [1.4.2] - 2026-10-25
 
 **修复：本地校验脚本会删掉用户正式安装的图标与「设置→应用」登记。**
