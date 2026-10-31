@@ -186,3 +186,15 @@ def test_fetch_release_stable_uses_latest(monkeypatch):
     monkeypatch.setattr(payload, "_request_json", fake_json)
     payload.fetch_release("https://api/x/releases/latest", "stable")
     assert calls == ["https://api/x/releases/latest"]
+
+
+def test_version_file_matches_package_version():
+    """build_release.py reads ``MaaAutoInstaller/VERSION`` for the manifest, so it must
+    match ``installer.__version__`` -- a stale file shipped a Setup whose manifest said
+    1.4.5 while the package was 1.4.6, and the release smoke test caught it only on CI."""
+    from pathlib import Path
+
+    import installer
+
+    version_file = Path(__file__).resolve().parent.parent / "MaaAutoInstaller" / "VERSION"
+    assert version_file.read_text(encoding="utf-8").strip() == installer.__version__
