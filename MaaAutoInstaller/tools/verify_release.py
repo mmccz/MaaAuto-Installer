@@ -134,7 +134,7 @@ shutil.copy2(setup, local_setup)
 def install(extra=None):
     if APP_DIR.exists():
         shutil.rmtree(APP_DIR, ignore_errors=True)
-    shutil.rmtree(SM, ignore_errors=True)
+    shell.clear_start_menu_group()
     if DESKTOP_LNK.exists():
         DESKTOP_LNK.unlink()
     # 必须显式 /DIR：Inno 默认复用上次安装目录（本机曾被 deploy_dev.py 装到 D:\MaaAuto）
@@ -161,7 +161,7 @@ print("[1] 安装：不创建开始菜单（/MERGETASKS=!startmenuicon）")
 code = install(["/MERGETASKS=!startmenuicon"])
 check("安装退出码 0", code == 0, str(code))
 check("安装目录存在", APP_DIR.exists())
-check("未创建开始菜单（任务生效）", not SM.exists(), str(SM))
+check("未创建开始菜单（任务生效）", not shell.start_menu_files(), str(SM))
 manifest = json.loads((APP_DIR / ".maaauto.json").read_text(encoding="utf-8"))
 check(f"manifest 版本 = {VERSION}", manifest.get("version") == VERSION,
       str(manifest.get("version")))
@@ -209,14 +209,15 @@ print("[3] 卸载（未建开始菜单的安装）")
 code = uninstall()
 check("卸载退出码 0", code == 0, str(code))
 check("安装目录已删除", not APP_DIR.exists(), str(APP_DIR))
-check("没有开始菜单残留", not SM.exists(), str(SM))
+check("没有开始菜单残留", not shell.start_menu_files(), str(SM))
 
 print("=" * 72)
 print("[4] 安装（默认任务，创建开始菜单）")
 code = install()
 check("安装退出码 0", code == 0, str(code))
-check("开始菜单已创建", SM.exists(), str(SM))
-sm_files = sorted(p.name for p in SM.rglob("*.lnk")) if SM.exists() else []
+sm_files_real = shell.start_menu_files()
+check("开始菜单已创建", bool(sm_files_real), str(SM))
+sm_files = sorted(Path(p).name for p in sm_files_real if p.endswith(".lnk"))
 check("开始菜单含两个快捷方式", len(sm_files) == 2, str(sm_files))
 
 print("=" * 72)
@@ -286,7 +287,7 @@ print("[6] 卸载（有开始菜单的安装）")
 code = uninstall()
 check("卸载退出码 0", code == 0, str(code))
 check("安装目录已删除", not APP_DIR.exists(), str(APP_DIR))
-check("开始菜单目录已删除", not SM.exists(), str(SM))
+check("开始菜单目录已删除", not shell.start_menu_files(), str(SM))
 check("桌面快捷方式不存在", not DESKTOP_LNK.exists())
 
 print()
@@ -295,6 +296,14 @@ print("[7] 还原本机原有的外壳集成")
 try:
     _restored = shell.restore(_snapshot)
     print(f"  {_restored}")
+    _files_now = shell.start_menu_files()
+    check("开始菜单已按快照还原", _files_now == _snapshot.group_files,
+          f"now={sorted(_files_now)} snap={sorted(_snapshot.group_files)}")
+    if _snapshot.desktop_link is not None:
+        check("桌面快捷方式已按快照还原",
+              DESKTOP_LNK.exists()
+              and DESKTOP_LNK.read_bytes() == _snapshot.desktop_link,
+              str(DESKTOP_LNK))
     if _foreign is not None:
         loc = shell.installed_location()
         check(f"用户那份安装的登记已恢复（{_foreign}）",

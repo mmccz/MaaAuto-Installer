@@ -161,3 +161,93 @@ def test_repair_writes_registry_and_links(tmp_path, monkeypatch):
     assert items["InstallLocation"] == str(install) + "\\"
     assert str(install / shell.UNINSTALLER_EXE) in items["UninstallString"]
     assert items["DisplayIcon"] == str(install / shell.MAIN_EXE)
+
+
+# --------------------------------------------------------------------------- #
+# Microsoft Store 版 Python：%APPDATA% 被重定向到 LocalCache
+# --------------------------------------------------------------------------- #
+def test_packaged_python_detection(monkeypatch):
+    monkeypatch.setattr(shell.sys, "prefix",
+                        r"C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_x64__qbz5n2kfra8p0")
+    assert shell.packaged_python() is True
+    monkeypatch.setattr(shell.sys, "prefix", r"C:\Python311")
+    assert shell.packaged_python() is False
+
+
+def test_snapshot_reads_group_through_powershell_when_packaged(monkeypatch, tmp_path):
+    monkeypatch.setattr(shell, "packaged_python", lambda: True)
+    monkeypatch.setattr(shell, "start_menu_group", lambda: tmp_path / "sm" / "MaaAuto")
+    monkeypatch.setattr(shell, "read_uninstall_key", lambda: None)
+    monkeypatch.setattr(shell, "desktop_lnk", lambda: tmp_path / "NoDesktop.lnk")
+    monkeypatch.setattr(shell, "_read_group_via_ps",
+                        lambda group: {"MaaAuto.lnk": b"REAL-LNK"})
+    snap = shell.snapshot()
+    assert snap.group_files == {"MaaAuto.lnk": b"REAL-LNK"}
+
+
+def test_restore_writes_group_through_powershell_when_packaged(monkeypatch, tmp_path):
+    calls = {}
+    monkeypatch.setattr(shell, "packaged_python", lambda: True)
+    monkeypatch.setattr(shell, "start_menu_group", lambda: tmp_path / "sm" / "MaaAuto")
+    monkeypatch.setattr(shell, "write_uninstall_key", lambda items: None)
+    monkeypatch.setattr(shell, "desktop_lnk", lambda: tmp_path / "NoDesktop.lnk")
+
+    def fake_write(group, files):
+        calls["group"] = group
+        calls["files"] = files
+        return True
+
+    monkeypatch.setattr(shell, "_write_group_via_ps", fake_write)
+    snap = shell.IntegrationSnapshot(key_items=[("DisplayName", "MaaAuto", 1)],
+                                     group_files={"MaaAuto.lnk": b"REAL-LNK"})
+    msg = shell.restore(snap)
+    assert calls["files"] == {"MaaAuto.lnk": b"REAL-LNK"}
+    assert "还原开始菜单" in msg
+
+
+def test_restore_reports_failure_when_powershell_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(shell, "packaged_python", lambda: True)
+    monkeypatch.setattr(shell, "start_menu_group", lambda: tmp_path / "sm" / "MaaAuto")
+    monkeypatch.setattr(shell, "write_uninstall_key", lambda items: None)
+    monkeypatch.setattr(shell, "desktop_lnk", lambda: tmp_path / "NoDesktop.lnk")
+    monkeypatch.setattr(shell, "_write_group_via_ps", lambda group, files: False)
+
+    snap = shell.IntegrationSnapshot(key_items=None,
+                                     group_files={"MaaAuto.lnk": b"X"})
+    msg = shell.restore(snap)
+    assert "开始菜单还原失败" in msg
+
+
+def test_write_lnk_uses_powershell_when_packaged(monkeypatch, tmp_path):
+    used = {}
+    monkeypatch.setattr(shell, "packaged_python", lambda: True)
+
+    def fake_ps(script):
+        used["script"] = script
+        return ""
+
+    monkeypatch.setattr(shell, "_ps", fake_ps)
+    ok = shell._write_lnk(tmp_path / "sm" / "MaaAuto.lnk", tmp_path / "MaaAuto.exe",
+                          tmp_path, "MaaAuto")
+    assert ok is True
+    assert "CreateShortcut" in used["script"]
+
+
+
+def test_restore_keeps_real_install_when_snapshot_was_empty(monkeypatch, tmp_path):
+    """快照时没读到登记，但那条登记指向一个仍在的正式安装 → 不能删。"""
+    install = tmp_path / "app"
+    install.mkdir()
+    (install / shell.MAIN_EXE).write_bytes(b"exe")
+    state = {"key": [("InstallLocation", str(install) + "\\", 1)]}
+    monkeypatch.setattr(shell, "read_uninstall_key", lambda: state["key"])
+    monkeypatch.setattr(shell, "write_uninstall_key",
+                        lambda items: state.__setitem__("key", list(items)))
+    monkeypatch.setattr(shell, "delete_uninstall_key",
+                        lambda: state.__setitem__("key", None))
+    monkeypatch.setattr(shell, "start_menu_group", lambda: tmp_path / "sm" / "MaaAuto")
+    monkeypatch.setattr(shell, "desktop_lnk", lambda: tmp_path / "NoDesktop.lnk")
+
+    msg = shell.restore(shell.IntegrationSnapshot(key_items=None))
+    assert "保留现有登记" in msg
+    assert state["key"] is not None

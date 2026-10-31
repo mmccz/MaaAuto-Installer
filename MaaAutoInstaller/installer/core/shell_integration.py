@@ -27,8 +27,11 @@ Inno 安装包有三样东西是**按 AppId 全局共享**的，跟装在哪个�
 ``repair_integration()`` 用来给已经被误删的机器重建这些登记信息。
 """
 
+import base64
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +64,117 @@ def desktop_lnk() -> Path:
     # Inno 的 {autodesktop} 在 per-user 安装下就是当前用户桌面
     desktop = Path(os.environ.get("USERPROFILE") or str(Path.home())) / "Desktop"
     return desktop / f"{APP_NAME}.lnk"
+
+
+# --------------------------------------------------------------------------- #
+# Microsoft Store 版 Python 的 MSIX 目录重定向
+# --------------------------------------------------------------------------- #
+def packaged_python() -> bool:
+    """解释器是否来自 Microsoft Store（MSIX 打包应用）。
+
+    MSIX 应用写 ``%APPDATA%`` 会被静默重定向到
+    ``%LOCALAPPDATA%\\Packages\\<包>\\LocalCache\\Roaming``，Explorer / Inno 都看不到。
+    于是「修复开始菜单」会报 OK、实际什么也没建出来（1.4.2 修复后复测踩到）。
+
+    子进程（powershell.exe）不继承包身份，写的是真实路径，所以这类路径的
+    读写统一交给 PowerShell 做。
+    """
+    prefix = str(getattr(sys, "prefix", "")).replace("/", "\\").lower()
+    return "\\windowsapps\\" in prefix
+
+
+def _ps_literal(text: object) -> str:
+    """包成 PowerShell 单引号字符串（单引号自身翻倍）。"""
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def _ps(script: str) -> Optional[str]:
+    """跑一段 PowerShell；成功返回 stdout，失败/不可用返回 None。"""
+    if os.name != "nt":
+        return None
+    exe = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell"
+    try:
+        proc = subprocess.run(
+            [exe, "-NoProfile", "-NonInteractive", "-Command",
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + script],
+            capture_output=True, timeout=60)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8-sig", "replace")
+
+
+def _read_group_via_ps(group: Path) -> Dict[str, bytes]:
+    root = _ps_literal(str(group))
+    script = (
+        f"$root = {root};"
+        "if (-not (Test-Path -LiteralPath $root)) { exit 3 };"
+        "$root = (Resolve-Path -LiteralPath $root).Path;"
+        "Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object {"
+        "  $rel = $_.FullName.Substring($root.Length + 1).Replace('\\', '/');"
+        "  $rel + [char]9 + [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))"
+        " }"
+    )
+    out = _ps(script)
+    if not out:
+        return {}
+    files: Dict[str, bytes] = {}
+    for line in out.splitlines():
+        if "\t" not in line:
+            continue
+        rel, b64 = line.split("\t", 1)
+        try:
+            files[rel.strip()] = base64.b64decode(b64.strip())
+        except Exception:
+            continue
+    return files
+
+
+def _write_group_via_ps(group: Path, files: Dict[str, bytes]) -> bool:
+    """用 PowerShell 重建开始菜单组（先整个删掉，再按字节写回）。"""
+    parts = [
+        f"$root = {_ps_literal(str(group))};",
+        "if (Test-Path -LiteralPath $root) {"
+        " Remove-Item -LiteralPath $root -Recurse -Force };",
+    ]
+    for rel, data in files.items():
+        target = Path(str(group)) / rel
+        b64 = base64.b64encode(data).decode("ascii")
+        parts.append(f"$p = {_ps_literal(str(target))};")
+        parts.append("New-Item -ItemType Directory -Path (Split-Path -Parent $p)"
+                     " -Force | Out-Null;")
+        parts.append(f"[IO.File]::WriteAllBytes($p,"
+                     f" [Convert]::FromBase64String('{b64}'));")
+    return _ps("".join(parts)) is not None
+
+
+def start_menu_files() -> Dict[str, bytes]:
+    """开始菜单组里的文件（相对路径 → 原始字节），空组/不存在返回 {}。"""
+    if packaged_python():
+        return _read_group_via_ps(start_menu_group())
+    group = start_menu_group()
+    files: Dict[str, bytes] = {}
+    if group.is_dir():
+        for p in group.rglob("*"):
+            if p.is_file():
+                try:
+                    files[p.relative_to(group).as_posix()] = p.read_bytes()
+                except OSError:
+                    pass
+    return files
+
+
+def clear_start_menu_group() -> None:
+    """删掉开始菜单组（真实路径；MSIX 下不能直接 rmtree）。"""
+    group = start_menu_group()
+    if packaged_python():
+        _ps("if (Test-Path -LiteralPath %s) { Remove-Item -LiteralPath %s"
+            " -Recurse -Force }" % (_ps_literal(group), _ps_literal(group)))
+    else:
+        shutil.rmtree(group, ignore_errors=True)
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -160,15 +274,8 @@ class IntegrationSnapshot:
 
 def snapshot() -> IntegrationSnapshot:
     snap = IntegrationSnapshot(key_items=read_uninstall_key())
-    group = start_menu_group()
-    if group.is_dir():
-        for p in group.rglob("*"):
-            if p.is_file():
-                rel = p.relative_to(group).as_posix()
-                try:
-                    snap.group_files[rel] = p.read_bytes()
-                except OSError:
-                    pass
+    # 开始菜单组用 start_menu_files()：MSIX Python 下必须走 PowerShell 才看得见真实目录
+    snap.group_files = start_menu_files()
     lnk = desktop_lnk()
     if lnk.is_file():
         try:
@@ -184,23 +291,39 @@ def restore(snap: IntegrationSnapshot) -> str:
 
     # 注册表
     if snap.key_items is None:
-        delete_uninstall_key()
-        actions.append("已清掉本次校验写入的注册表项")
+        # 快照时没有登记：正常情况下要删掉校验过程写进去的那条。
+        # 但如果登记的安装目录还在（程序文件也在），说明这是用户的正式安装，
+        # 宁可留一条多余登记也不能再删一次（1.4.1 事故就是这么来的）。
+        loc = installed_location()
+        if loc is not None and (loc / MAIN_EXE).exists():
+            actions.append(f"保留现有登记（{loc} 仍在），未删除")
+        else:
+            delete_uninstall_key()
+            actions.append("已清掉本次校验写入的注册表项")
     else:
         write_uninstall_key(snap.key_items)
         actions.append(f"还原注册表项（{len(snap.key_items)} 个值）")
 
     # 开始菜单：先删掉校验过程留下的，再按快照重建
     group = start_menu_group()
-    if group.exists():
-        shutil.rmtree(group, ignore_errors=True)
-    if snap.group_files:
-        group.mkdir(parents=True, exist_ok=True)
-        for rel, data in snap.group_files.items():
-            target = group / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        actions.append(f"还原开始菜单（{len(snap.group_files)} 个文件）")
+    if packaged_python():
+        # MSIX 重定向会让 write_bytes 写进 LocalCache，必须借 PowerShell 落真实路径
+        if _write_group_via_ps(group, snap.group_files):
+            if snap.group_files:
+                actions.append(f"还原开始菜单（{len(snap.group_files)} 个文件）")
+        else:
+            actions.append("开始菜单还原失败（PowerShell 不可用，请手动运行 "
+                           "tools/repair_integration.py）")
+    else:
+        if group.exists():
+            shutil.rmtree(group, ignore_errors=True)
+        if snap.group_files:
+            group.mkdir(parents=True, exist_ok=True)
+            for rel, data in snap.group_files.items():
+                target = group / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            actions.append(f"还原开始菜单（{len(snap.group_files)} 个文件）")
 
     # 桌面
     lnk = desktop_lnk()
@@ -221,8 +344,29 @@ def restore(snap: IntegrationSnapshot) -> str:
 # --------------------------------------------------------------------------- #
 # 修复（给被误删登记的机器用）
 # --------------------------------------------------------------------------- #
+def _write_lnk_via_ps(path: Path, target: Path, workdir: Path,
+                      description: str = "") -> bool:
+    """在**真实**路径建 .lnk（绕开 MSIX 的 %APPDATA% 重定向）。"""
+    script = (
+        "$sh = New-Object -ComObject WScript.Shell;"
+        f"$lnk = $sh.CreateShortcut({_ps_literal(path)});"
+        f"$lnk.TargetPath = {_ps_literal(target)};"
+        f"$lnk.WorkingDirectory = {_ps_literal(workdir)};"
+        f"$lnk.IconLocation = {_ps_literal(target)};"
+        f"$lnk.Description = {_ps_literal(description)};"
+        "$lnk.Save();"
+        "if (-not (Test-Path -LiteralPath "
+        f"{_ps_literal(path)})) {{ exit 5 }}"
+    )
+    dir_script = ("New-Item -ItemType Directory -Path (Split-Path -Parent "
+                  f"{_ps_literal(path)}) -Force | Out-Null;")
+    return _ps(dir_script + script) is not None
+
+
 def _write_lnk(path: Path, target: Path, workdir: Path, description: str = "") -> bool:
     """用 WScript.Shell 建 .lnk（pywin32 不在装机依赖里，这里按需导入）。"""
+    if packaged_python():
+        return _write_lnk_via_ps(path, target, workdir, description)
     try:
         import win32com.client
     except Exception:

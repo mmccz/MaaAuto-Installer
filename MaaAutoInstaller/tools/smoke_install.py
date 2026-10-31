@@ -191,7 +191,7 @@ def main():
     if app_dir.exists():
         shutil.rmtree(app_dir, ignore_errors=True)
         time.sleep(0.5)
-    shutil.rmtree(START_MENU, ignore_errors=True)
+    shell.clear_start_menu_group()
 
     proc = run([local_setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                 f"/DIR={app_dir}", "/MERGETASKS=!startmenuicon"], timeout=900)
@@ -205,7 +205,7 @@ def main():
     check("卸载器在", (app_dir / "unins000.exe").exists())
     check("_internal 已解包", (app_dir / "_internal").is_dir())
     # /MERGETASKS=!startmenuicon 必须生效，否则用户开始菜单会被塞快捷方式
-    check("未创建开始菜单（任务参数生效）", not START_MENU.exists(), str(START_MENU))
+    check("未创建开始菜单（任务参数生效）", not shell.start_menu_files(), str(START_MENU))
 
     manifest_path = app_dir / ".maaauto.json"
     manifest = {}
