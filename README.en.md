@@ -1,6 +1,6 @@
 # MaaAuto Installer
 
-> English summary of [README.md](README.md) (Chinese is the primary doc)｜App repo: [MaaAuto-Tool-works](https://github.com/mmccz/MaaAuto-Tool-works)
+> English summary of [README.md](README.md) (Chinese is the primary doc)｜App repo: [MaaAuto-Tool-works](https://github.com/mmccz/MaaAuto-Tool-works)｜User docs: [Wiki](https://github.com/mmccz/MaaAuto-Tool-works/wiki)
 
 Installer / updater / uninstaller for MaaAuto, plus the build and release scripts. Everything is Inno Setup + Python; there is no runtime dependency on PySide6.
 

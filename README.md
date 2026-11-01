@@ -14,7 +14,7 @@
 
 </div>
 
-**简体中文** ｜ [English](README.en.md)
+**简体中文** ｜ [English](README.en.md) ｜ 🌐 [使用者文档（主仓库 Wiki）](https://github.com/mmccz/MaaAuto-Tool-works/wiki)
 
 ---
 
